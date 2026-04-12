@@ -12,7 +12,7 @@ import struct
 import webbrowser
 from tkinter import colorchooser
 from pathlib import Path
-modloader_version = "1.3.9"
+modloader_version = "1.4.0"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -2179,69 +2179,99 @@ class ModLoaderGUI:
         if not folder or not os.path.isdir(folder):
             messagebox.showerror("Error", "Please select a valid mod folder first.")
             return
+        # ---------------- LOAD SETTING.JSON ----------------
+        settings_path = os.path.join(folder, "setting.json")
+        skip_encryption = False
+
+        if os.path.isfile(settings_path):
+            try:
+                with open(settings_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                    skip_encryption = data.get("skip_encryption", False)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read setting.json:\n{e}")
+                return
+        else:
+            # if no settings.json → default false (normal behavior)
+            skip_encryption = False
+
         asset_folder_v = os.path.join(folder, "assets")
         asset_folder = os.path.join(folder, "assets_cache")
-        try:
-            decoded_count, missing_meta = self.decrypt_assets_internal(asset_folder_v, asset_folder, use_hash=False)
-        except Exception as e:
-            messagebox.showerror(
-                "Decrypt Error",
-                "Failed to decrypt assets.\n"
-                "This mod may be incompatible with the current game version or region.\n\n"
-                f"{e}"
-            )
-            return
 
-        if not os.listdir(asset_folder):
+        # ---------------- DECRYPT OR SKIP ----------------
+        missing_meta = 0
+        decoded_count = 0
+        if skip_encryption:
+            asset_folder = asset_folder_v
+        else:
+            try:
+                decoded_count, missing_meta = self.decrypt_assets_internal(
+                    asset_folder_v,
+                    asset_folder,
+                    use_hash=False
+                )
+            except Exception as e:
+                messagebox.showerror(
+                    "Decrypt Error",
+                    "Failed to decrypt assets.\n"
+                    "This mod may be incompatible with the current game version or region.\n\n"
+                    f"{e}"
+                )
+                return
+
+        # ---------------- EMPTY CHECK ----------------
+        if not os.path.isdir(asset_folder) or not os.listdir(asset_folder):
             messagebox.showinfo("uhh", "there nothing inside.")
-            shutil.rmtree(asset_folder, ignore_errors=True)
-            return
-            
-        # --- Step 2: load assets from decrypted cache ---
-        if not os.path.isdir(asset_folder):
-            messagebox.showerror("Error", f"Asset cache not found: {asset_folder}")
+            if not skip_encryption and os.path.exists(asset_folder):
+                shutil.rmtree(asset_folder, ignore_errors=True)
             return
 
+        # ---------------- LOAD ASSETS ----------------
         os.makedirs(self.backup_path, exist_ok=True)
-        assets = os.listdir(asset_folder)
+        if skip_encryption:
+            assets = self.scan_full_path(asset_folder)
+        else:
+            assets = os.listdir(asset_folder)
 
         self.progress_bar["maximum"] = len(assets)
         self.progress_bar["value"] = 0
 
         for i, asset in enumerate(assets, start=1):
-            src = os.path.join(asset_folder, asset)
-            dst = os.path.join(self.dat_path, asset[:2], asset)
-            backup = os.path.join(self.backup_path, asset[:2], asset)
+
+            if skip_encryption:
+                src = os.path.join(asset_folder, asset)
+                filename = os.path.basename(asset)
+            else:
+                src = os.path.join(asset_folder, asset)
+                filename = asset
+
+            dst = os.path.join(self.dat_path, filename[:2], filename)
+            backup = os.path.join(self.backup_path, filename[:2], filename)
 
             if os.path.isfile(dst):
                 if not os.path.isfile(backup):
                     os.makedirs(os.path.dirname(backup), exist_ok=True)
-                    shutil.move(dst, backup)  # backup only once
+                    shutil.move(dst, backup)
                 else:
                     os.remove(dst)
             else:
-                messagebox.showerror(
-                    "Error",
-                    "Missing target file in dat folder.\nRun Uma Musume once with full data download first."
-                )
-                # cleanup cache before returning
-                if os.path.exists(asset_folder):
-                    shutil.rmtree(asset_folder, ignore_errors=True)
-                return
+                missing_meta += 1
+                continue
 
             shutil.copy(src, dst)
+            decoded_count += 1
             self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
             self.progress_bar["value"] = i
             self.root.update_idletasks()
 
         # --- Step 3: cleanup ---
-        if os.path.exists(asset_folder):
+        if not skip_encryption and os.path.exists(asset_folder):
             shutil.rmtree(asset_folder, ignore_errors=True)
         self.progress_label.config(text="Waiting")
         messagebox.showinfo(
             "Success",
             f"{decoded_count} assets loaded successfully.\n"
-            f"{missing_meta} assets were not found in meta database."
+            f"{missing_meta} assets missing in dat folder."
         )
 
     def unload_assets(self):
