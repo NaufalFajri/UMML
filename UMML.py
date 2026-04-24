@@ -3,16 +3,14 @@ import json
 import shutil
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, colorchooser
 import sqlite3
 import subprocess
 import re
 import winreg
 import struct
-import webbrowser
-from tkinter import colorchooser
 from pathlib import Path
-modloader_version = "1.4.1"
+modloader_version = "1.4.2"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -22,6 +20,7 @@ try:
     import UnityPy
     import vdf
     import apsw
+    import yaml
 except ImportError:
     rootuni = tk.Tk()
     rootuni.withdraw()
@@ -34,6 +33,7 @@ except ImportError:
             install_package("unitypy")
             install_package("vdf")
             install_package("apsw-sqlite3mc")
+            install_package("pyyaml")
             messagebox.showinfo(
                 "Installed",
                 "Please restart the application."
@@ -51,6 +51,7 @@ except ImportError:
 print("[OK] UnityPy ready")
 print("[OK] vdf ready")
 print("[OK] apsw-sqlite3mc ready")
+print("[OK] pyyaml")
 
 def find_dmm_umamusume():
     try:
@@ -1950,6 +1951,7 @@ class ModLoaderGUI:
             # ---------------- RANDOM TIME FIELDS ---------------- #
 
             time_columns = [
+                "scale",
                 "ear_random_time_min",
                 "ear_random_time_max",
                 "tail_random_time_min",
@@ -1962,7 +1964,7 @@ class ModLoaderGUI:
 
             time_vars = {}
 
-            time_frame = tk.LabelFrame(detail, text="Random Motion Timers")
+            time_frame = tk.LabelFrame(detail, text="Parameter")
             time_frame.pack(fill="x", pady=5)
 
             for col in time_columns:
@@ -2130,23 +2132,36 @@ class ModLoaderGUI:
         #self.assets_unload_btn.config(state="disabled")
 
     def reload(self):
-        mods_setting_path = os.path.join(self.mod_path.get(), "setting.json")
+        mod_folder = self.mod_path.get()
 
-        if not os.path.isfile(mods_setting_path):
-            messagebox.showerror("Error", "No 'setting.json' found in selected mod folder.")
-            self.reset_mod_info()
-            return
+        json_path = os.path.join(mod_folder, "setting.json")
+        yml_path = os.path.join(mod_folder, "setting.yml")
 
-        try:
-            with open(mods_setting_path, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load setting.json:\n{e}")
-            self.reset_mod_info()
-            return
+        data = None
 
-        if not all(k in data for k in required_keys):
-            messagebox.showerror("Error", "'setting.json' is missing required keys.")
+        # --- try JSON first ---
+        if os.path.isfile(json_path):
+            try:
+                with open(json_path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load setting.json:\n{e}")
+                self.reset_mod_info()
+                return
+
+        # --- fallback to YAML ---
+        elif os.path.isfile(yml_path):
+            try:
+                with open(yml_path, encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load setting.yml:\n{e}")
+                self.reset_mod_info()
+                return
+
+        # --- no config found ---
+        else:
+            messagebox.showerror("Error", "No setting.json or setting.yml found.")
             self.reset_mod_info()
             return
 
@@ -2364,16 +2379,29 @@ class ModLoaderGUI:
         name_map = {}
         if os.path.isfile(meta_path):
             try:
-                conn = sqlite3.connect(meta_path)
-                c = conn.cursor()
-                for f in backup_files:
-                    fname = os.path.basename(f)   # only filename
-                    c.execute("SELECT n FROM a WHERE h=?", (fname,))
-                    row = c.fetchone()
-                    if row:
-                        name_map[f] = row[0]
-                    else:
-                        name_map[f] = fname
+                hashes = [os.path.basename(f) for f in backup_files]
+                name_map = {}
+
+                if hashes:
+                    try:
+                        conn = sqlite3.connect(meta_path)
+                        c = conn.cursor()
+
+                        # SQLite has limit (~999), so chunk it
+                        chunk_size = 900
+                        for i in range(0, len(hashes), chunk_size):
+                            chunk = hashes[i:i + chunk_size]
+                            placeholders = ",".join(["?"] * len(chunk))
+
+                            c.execute(f"SELECT h, n FROM a WHERE h IN ({placeholders})", chunk)
+
+                            for h, n in c.fetchall():
+                                name_map[h] = n
+
+                        conn.close()
+
+                    except Exception as e:
+                        messagebox.showwarning("Meta DB", f"Failed batch lookup:\n{e}")
                 conn.close()
             except Exception as e:
                 messagebox.showwarning("Meta DB", f"Failed to read meta database:\n{e}")
@@ -2390,10 +2418,12 @@ class ModLoaderGUI:
         scrollbar.pack(side="right", fill="y")
 
         listbox = tk.Listbox(frame, selectmode="extended", yscrollcommand=scrollbar.set, width=100, height=20)
-        entries = [(f, name_map.get(f, os.path.basename(f))) for f in backup_files]
+        entries = [
+            (f, name_map.get(os.path.basename(f), os.path.basename(f)))
+            for f in backup_files
+        ]
         entries.sort(key=lambda x: x[1].lower())  # sort by friendly name
-        for f, display_name in entries:
-            listbox.insert(tk.END, display_name)
+        listbox.insert(tk.END, *[display_name for _, display_name in entries])
         listbox.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=listbox.yview)
 
