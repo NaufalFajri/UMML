@@ -371,7 +371,7 @@ class ModLoaderGUI:
         control_frame.pack(fill="x", padx=10, pady=5)
         self.assets_load_btn = tk.Button(control_frame, text="Load Assets", state="disabled", command=self.load_assets)
         self.assets_load_btn.pack(side="left", padx=5)
-        self.assets_load_raw_btn = tk.Button(control_frame, text="Load Assets (raw)", command=self.load_assets_manual)
+        self.assets_load_raw_btn = tk.Button(control_frame, text="Load Assets (manual)", command=self.load_assets_manual)
         self.assets_load_raw_btn.pack(side="left", padx=5)
         #self.assets_unload_btn = tk.Button(control_frame, text="Unload Assets", state="disabled", command=self.unload_assets)
         #self.assets_unload_btn.pack(side="left", padx=5)
@@ -389,7 +389,7 @@ class ModLoaderGUI:
         self.progress_bar.pack()
         
     # from kairusds/umamusu-utils
-    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False):
+    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False, filter_path=None):
         AB_KEY = b'\x53\x2B\x46\x31\xE4\xA7\xB9\x47\x3E\x7C\xFB'
 
         def derive_asset_key(key_long):
@@ -420,6 +420,17 @@ class ModLoaderGUI:
 
         # DRIVE FROM MOD FILES
         all_paths = list(self.scan_full_path(src_root))
+
+        # ---------------- FILTER ----------------
+        if filter_path:
+            filtered = []
+            for p in all_paths:
+                parts = p.replace("\\", "/").split("/")
+                if filter_path in parts:
+                    filtered.append(p)
+            all_paths = filtered
+            #print(f"filtered: {all_paths}")
+            
         total = len(all_paths)
         self.progress_bar["maximum"] = total
         self.progress_bar["value"] = 0
@@ -950,7 +961,7 @@ class ModLoaderGUI:
         print(f"Copied {copied} assets")
 
         # -------- DECRYPT --------
-        decoded_count, missing_meta = self.decrypt_assets_internal(raw_dir, dec_dir, use_hash=True)
+        decoded_count, missing_meta = self.decrypt_assets_internal(raw_dir, dec_dir, use_hash=True, filter_path=None)
 
         # -------- MODIFY BUNDLES --------
         for file in os.listdir(dec_dir):
@@ -2181,89 +2192,166 @@ class ModLoaderGUI:
         #self.assets_unload_btn.config(state="normal" if assets_exist else "disabled")
 
     def load_assets_manual(self):
-        # ---------------- MODE SELECT ----------------
-        choice = messagebox.askyesnocancel(
-            "Load Assets",
-            "Yes = Load Folder\nNo = Load Files\nCancel = Abort"
-        )
-
-        if choice is None:
-            return  # cancel
-
-        # ---------------- PICK PATH ----------------
-        if choice:  # YES → folder
-            path = filedialog.askdirectory(title="Select Asset Folder")
-            if not path:
-                return
-            rel_paths = self.scan_full_path(path)
-            assets = [os.path.join(path, p) for p in rel_paths]
-
-        else:  # NO → files
-            files = filedialog.askopenfilenames(title="Select Asset Files")
-            if not files:
-                return
-            assets = list(files)
-
-        if not assets:
-            messagebox.showinfo("uhh", "there nothing inside.")
+        path = filedialog.askdirectory(title="Select Asset Folder")
+        if not path:
             return
 
-        # ---------------- CONFIRM ----------------
+        has_pcs = messagebox.askyesnocancel(
+            "Ask",
+            "Does the mod contain Unencrypted PC assets (PC-s)?"
+        )
+
+        if has_pcs is None:
+            return
+
+        if has_pcs:
+            mode = "decrypt"
+            filter_folder = "PC-s"
+        else:
+            is_mod_encrypted = messagebox.askyesnocancel(
+                "Ask",
+                "Are these assets already encrypted / made for engine update?"
+            )
+
+            if is_mod_encrypted is None:
+                return
+
+            if is_mod_encrypted:
+                mode = "direct"
+            else:
+                mode = "decrypt"
+                filter_folder = "DMM"
+                        
+        # ---------------- LOAD ---------------- if is_mod_encrypted is true
         confirm = messagebox.askyesno(
             "Confirm",
-            f"Load {len(assets)} assets?"
+            f"Load assets now?"
         )
 
         if not confirm:
             return
+            
+        if mode == "direct":
+            rel_paths = self.scan_full_path(path)
+            assets = [os.path.join(path, p) for p in rel_paths]
 
-        # ---------------- LOAD ----------------
-        os.makedirs(self.backup_path, exist_ok=True)
+            if not assets:
+                messagebox.showinfo("uhh", "there nothing inside.")
+                return
+                
+            os.makedirs(self.backup_path, exist_ok=True)
 
-        self.progress_bar["maximum"] = len(assets)
-        self.progress_bar["value"] = 0
+            self.progress_bar["maximum"] = len(assets)
+            self.progress_bar["value"] = 0
 
-        loaded_count = 0
-        missing_count = 0
+            loaded_count = 0
+            missing_count = 0
 
-        for i, src in enumerate(assets, start=1):
-            filename = os.path.basename(src)
+            for i, src in enumerate(assets, start=1):
+                filename = os.path.basename(src)
 
-            # optional filter
-            if len(filename) < 32:
-                continue
+                # optional filter
+                if len(filename) < 32:
+                    continue
 
-            dst = os.path.join(self.dat_path, filename[:2], filename)
-            backup = os.path.join(self.backup_path, filename[:2], filename)
+                dst = os.path.join(self.dat_path, filename[:2], filename)
+                backup = os.path.join(self.backup_path, filename[:2], filename)
 
-            if os.path.isfile(dst):
-                if not os.path.isfile(backup):
-                    os.makedirs(os.path.dirname(backup), exist_ok=True)
-                    shutil.move(dst, backup)
+                if os.path.isfile(dst):
+                    if not os.path.isfile(backup):
+                        os.makedirs(os.path.dirname(backup), exist_ok=True)
+                        shutil.move(dst, backup)
+                    else:
+                        os.remove(dst)
                 else:
-                    os.remove(dst)
-            else:
-                missing_count += 1
-                continue
+                    missing_count += 1
+                    continue
 
+                try:
+                    shutil.copy(src, dst)
+                    loaded_count += 1
+                except Exception:
+                    missing_count += 1
+                    continue
+
+                self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
+                self.progress_bar["value"] = i
+                self.root.update_idletasks()
+
+            self.progress_label.config(text="Waiting")
+
+            messagebox.showinfo(
+                "Success",
+                f"{loaded_count} assets loaded successfully.\n"
+                f"{missing_count} assets missing in dat folder."
+            )
+            return
+        # ---------------- LOAD ---------------- if is_mod_encrypted is false
+        elif mode == "decrypt":
+            asset_folder = os.path.join(path, ".assets_cache")
             try:
+                decoded_count, missing_meta = self.decrypt_assets_internal(path, asset_folder, use_hash=False, filter_path=filter_folder)
+            except Exception as e:
+                messagebox.showerror(
+                    "Decrypt Error",
+                    "Failed to decrypt assets.\n"
+                    "This mod may be incompatible with the current game version or region.\n\n"
+                    f"{e}"
+                )
+                return
+
+            if not os.listdir(asset_folder):
+                messagebox.showinfo("uhh", "there nothing inside.")
+                shutil.rmtree(asset_folder, ignore_errors=True)
+                return
+                
+            # --- Step 2: load assets from decrypted cache ---
+            if not os.path.isdir(asset_folder):
+                messagebox.showerror("Error", f"Asset cache not found: {asset_folder}")
+                return
+
+            os.makedirs(self.backup_path, exist_ok=True)
+            assets = os.listdir(asset_folder)
+
+            self.progress_bar["maximum"] = len(assets)
+            self.progress_bar["value"] = 0
+
+            for i, asset in enumerate(assets, start=1):
+                src = os.path.join(asset_folder, asset)
+                dst = os.path.join(self.dat_path, asset[:2], asset)
+                backup = os.path.join(self.backup_path, asset[:2], asset)
+
+                if os.path.isfile(dst):
+                    if not os.path.isfile(backup):
+                        os.makedirs(os.path.dirname(backup), exist_ok=True)
+                        shutil.move(dst, backup)  # backup only once
+                    else:
+                        os.remove(dst)
+                else:
+                    messagebox.showerror(
+                        "Error",
+                        "Missing target file in dat folder.\nRun Uma Musume once with full data download first."
+                    )
+                    # cleanup cache before returning
+                    if os.path.exists(asset_folder):
+                        shutil.rmtree(asset_folder, ignore_errors=True)
+                    return
+
                 shutil.copy(src, dst)
-                loaded_count += 1
-            except Exception:
-                missing_count += 1
-                continue
+                self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
+                self.progress_bar["value"] = i
+                self.root.update_idletasks()
 
-            self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
-
-        self.progress_label.config(text="Waiting")
-
-        messagebox.showinfo(
-            "Success",
-            f"{loaded_count} assets loaded successfully.\n"
-            f"{missing_count} assets missing in dat folder."
-        )
+            # --- Step 3: cleanup ---
+            if os.path.exists(asset_folder):
+                shutil.rmtree(asset_folder, ignore_errors=True)
+            self.progress_label.config(text="Waiting")
+            messagebox.showinfo(
+                "Success",
+                f"{decoded_count} assets loaded successfully.\n"
+                f"{missing_meta} assets were not found in meta database."
+            )
+            return
 
     def load_assets(self):
         folder = self.mod_path.get()
@@ -2273,7 +2361,7 @@ class ModLoaderGUI:
         asset_folder_v = os.path.join(folder, "assets")
         asset_folder = os.path.join(folder, "assets_cache")
         try:
-            decoded_count, missing_meta = self.decrypt_assets_internal(asset_folder_v, asset_folder, use_hash=False)
+            decoded_count, missing_meta = self.decrypt_assets_internal(asset_folder_v, asset_folder, use_hash=False, filter_path=None)
         except Exception as e:
             messagebox.showerror(
                 "Decrypt Error",
