@@ -750,7 +750,7 @@ class ModLoaderGUI:
 
         win = tk.Toplevel(self.root)
         win.title(f"Edit Concert - Set {set_id}")
-        win.geometry("1100x600")
+        win.geometry("1250x600")
 
         # ---------------- GET CONCERT LIST ---------------- #
         c.execute("SELECT music_id FROM live_data WHERE has_live=1 ORDER BY music_id")
@@ -880,44 +880,48 @@ class ModLoaderGUI:
                 tk.Label(r, text=f"{i}", width=5).pack(side="left")
 
                 # --- Character ---
+                tk.Label(r, text=f"Chara", width=5).pack(side="left")
                 chara_var = tk.StringVar(value=chara_options[0])
                 chara_combo = ttk.Combobox(
                     r,
                     textvariable=chara_var,
                     values=chara_options,
                     state="readonly",
-                    width=30
+                    width=25
                 )
                 chara_combo.pack(side="left", padx=5)
 
                 # --- Main Dress ---
+                tk.Label(r, text=f"Main Dress", width=10).pack(side="left")
                 dress_var = tk.StringVar()
                 dress_combo = ttk.Combobox(
                     r,
                     textvariable=dress_var,
                     state="readonly",
-                    width=30
+                    width=40
                 )
                 dress_combo.pack(side="left", padx=5)
 
                 # --- Second Dress ---
+                tk.Label(r, text=f"Second Dress", width=10).pack(side="left")
                 dress2_var = tk.StringVar()
                 dress2_combo = ttk.Combobox(
                     r,
                     textvariable=dress2_var,
                     state="readonly",
-                    width=30
+                    width=40
                 )
                 dress2_combo.pack(side="left", padx=5)
 
                 # --- Vocal ---
+                tk.Label(r, text=f"Vocal", width=5).pack(side="left")
                 vocal_var = tk.StringVar(value="Default")
                 vocal_combo = ttk.Combobox(
                     r,
                     textvariable=vocal_var,
                     values=chara_options_with_default,
                     state="readonly",
-                    width=30
+                    width=25
                 )
                 vocal_combo.pack(side="left", padx=5)
 
@@ -940,12 +944,12 @@ class ModLoaderGUI:
                     for did in ids:
                         c.execute("SELECT text FROM text_data WHERE category=14 AND `index`=?", (did,))
                         name = c.fetchone()
-                        name = name[0] if name else "Unknown"
-
+                        name_og = name[0] if name else "Unknown"
+                        name = self.hachimi_translation_redirect(14, did, name_og)
                         c.execute("SELECT text FROM text_data WHERE category=15 AND `index`=?", (did,))
                         detail = c.fetchone()
-                        detail = detail[0] if detail else ""
-
+                        detail_og = detail[0] if detail else ""
+                        detail = self.hachimi_translation_redirect(15, did, detail_og)
                         options.append(f"{did} - {name} - {detail}")
 
                     if not options:
