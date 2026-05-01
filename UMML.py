@@ -10,7 +10,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.4.3"
+modloader_version = "1.4.3fix"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -770,46 +770,6 @@ class ModLoaderGUI:
             label = f"{mid} - {name}"
             concert_options.append(label)
             concert_map[label] = mid
-
-        # ---------------- CHARA DROPDOWN ---------------- #
-        c.execute("SELECT id FROM dress_data WHERE id BETWEEN 100000 AND 1000000 ORDER BY id")
-        dress_ids = [r[0] for r in c.fetchall()]
-
-        dress_options = []
-        dress_map = {}
-
-        for did in dress_ids:
-            c.execute("SELECT text FROM text_data WHERE category=14 AND `index`=?", (did,))
-            name = c.fetchone()
-            name_og = name[0] if name else "Unknown"
-            name = self.hachimi_translation_redirect(14, did, name_og)
-            c.execute("SELECT text FROM text_data WHERE category=15 AND `index`=?", (did,))
-            detail = c.fetchone()
-            detail_og = detail[0] if detail else ""
-            detail = self.hachimi_translation_redirect(15, did, detail_og)
-            label = f"{did} - {name} - {detail}"
-            dress_options.append(label)
-            dress_map[label] = did
-
-        # ---------------- DRESS DROPDOWN ---------------- #
-        c.execute("SELECT id FROM dress_data WHERE id BETWEEN 0 AND 1000 AND use_live = 0")
-        base_ids = [r[0] for r in c.fetchall()]
-
-        base_options = []
-        base_map = {}
-
-        for oid in base_ids:
-            c.execute("SELECT text FROM text_data WHERE category=14 AND `index`=?", (oid,))
-            name = c.fetchone()
-            name_og = name[0] if name else f"ID {oid}"
-            name = self.hachimi_translation_redirect(14, oid, name_og)
-            c.execute("SELECT text FROM text_data WHERE category=15 AND `index`=?", (oid,))
-            detail = c.fetchone()
-            detail_og = detail[0] if detail else "N/A"
-            detail = self.hachimi_translation_redirect(15, oid, detail_og)
-            label = f"{oid} - {name} - {detail}"
-            base_options.append(label)
-            base_map[label] = oid
             
         # chara dropdown    
         c.execute("SELECT id FROM chara_data ORDER BY id")
@@ -818,11 +778,13 @@ class ModLoaderGUI:
         chara_options = []
         chara_map = {}
 
+        # --- NORMAL CHARA ---
         for cid in chara_ids:
             c.execute("SELECT text FROM text_data WHERE category=6 AND `index`=?", (cid,))
             name = c.fetchone()
             name_og = name[0] if name else f"Chara {cid}"
             name = self.hachimi_translation_redirect(6, cid, name_og)
+
             label = f"{cid} - {name}"
             chara_options.append(label)
             chara_map[label] = cid
@@ -850,7 +812,6 @@ class ModLoaderGUI:
         scrollbar.pack(side="right", fill="y")
 
         # ---------------- BUILD ROWS ---------------- #
-        base_options_with_default = ["Default"] + base_options
         chara_options_with_default = ["Default"] + chara_options
         row_widgets = []
         def rebuild_rows(*args):
@@ -935,13 +896,16 @@ class ModLoaderGUI:
                     if not cid:
                         return
 
-                    c.execute("SELECT id FROM dress_data WHERE id BETWEEN 0 AND 1000 AND use_live=0")
+                    c.execute("SELECT id FROM dress_data WHERE id BETWEEN 0 AND 1000")
                     base_ids = [r[0] for r in c.fetchall()]
 
-                    c.execute("SELECT id FROM dress_data WHERE chara_id=?", (cid,))
+                    c.execute("SELECT id FROM dress_data WHERE chara_id=? AND body_type=230", (cid,))
+                    casual_chara_ids = [r[0] for r in c.fetchall()]
+                    
+                    c.execute("SELECT id FROM dress_data WHERE chara_id=? AND NOT body_type=230", (cid,))
                     chara_ids = [r[0] for r in c.fetchall()]
 
-                    ids = base_ids + chara_ids
+                    ids = base_ids + casual_chara_ids + chara_ids
 
                     options = []
                     for did in ids:
@@ -2600,8 +2564,8 @@ class ModLoaderGUI:
             self.description_box.insert(tk.END, "\n".join(desc))
         else:
             self.description_box.insert(tk.END, str(desc))
-        if data.get("modloader_version") != modloader_version:
-            self.description_box.insert(tk.END, f"\n\n[Note] This mod was made for version {data['modloader_version']}")
+        #if data.get("modloader_version") != modloader_version:
+            #self.description_box.insert(tk.END, f"\n\n[Note] This mod was made for version {data['modloader_version']}")
         self.description_box.configure(state="disabled")
 
         mod_folder = self.mod_path.get()
@@ -2628,7 +2592,7 @@ class ModLoaderGUI:
 
         if any(found.values()):
             # --- PC-s priority ---
-            region_warn = None
+            region_warn = ""
             if found["PC-s"]:
                 return "decrypt", "PC-s"
 
@@ -2651,7 +2615,7 @@ class ModLoaderGUI:
             if choice is None:
                 return None
             if choice:
-                if region_warn is not None:
+                if region_warn != "":
                     messagebox.showwarning("Sorry", "can't use encrypted asset for Global")
                     return None
                 return "direct", folder_type
