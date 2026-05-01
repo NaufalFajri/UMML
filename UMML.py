@@ -775,9 +775,6 @@ class ModLoaderGUI:
         c.execute("SELECT id FROM chara_data ORDER BY id")
         chara_ids = [r[0] for r in c.fetchall()]
 
-        c.execute("SELECT mob_id FROM mob_data ORDER BY mob_id")
-        mob_ids = [r[0] for r in c.fetchall()]
-
         chara_options = []
         chara_map = {}
 
