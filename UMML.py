@@ -10,7 +10,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.4.2"
+modloader_version = "1.4.3"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -717,29 +717,31 @@ class ModLoaderGUI:
 
     def open_edit_concert(self, set_id):
         
-        def get_values(chara_var, dress_var, vocal_var):
-            # LEFT (dress 100000+)
-            left_label = chara_var.get()
-            did = dress_map.get(left_label, 0)
+        def get_values(chara_var, dress_var, dress2_var, vocal_var):
+            # --- chara ---
+            chara_label = chara_var.get()
+            chara_id = chara_map.get(chara_label, 0)
 
-            # split chara_id
-            c.execute("SELECT chara_id FROM dress_data WHERE id=?", (did,))
-            row = c.fetchone()
-            base_cid = row[0] if row else 0
+            # --- main dress ---
+            dress_label = dress_var.get()
+            dress_id = 0
+            if dress_label and dress_label != "None":
+                dress_id = int(dress_label.split(" - ")[0])
 
-            # CENTER (dress)
-            if dress_var.get() == "Default":
-                final_dress = did
-            else:
-                final_dress = base_map.get(dress_var.get(), 0)
+            # --- second dress ---
+            dress2_label = dress2_var.get()
+            second_dress_id = 0
+            if dress2_label and dress2_label != "None":
+                second_dress_id = int(dress2_label.split(" - ")[0])
 
-            # RIGHT (vocal)
+            # --- vocal ---
             if vocal_var.get() == "Default":
-                final_vocal = base_cid
+                vocal_id = chara_id
             else:
-                final_vocal = chara_map.get(vocal_var.get(), 0)
+                vocal_id = chara_map.get(vocal_var.get(), 0)
 
-            return base_cid, final_dress, final_vocal
+            return chara_id, dress_id, second_dress_id, vocal_id
+
         
         db_path = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
 
@@ -748,16 +750,19 @@ class ModLoaderGUI:
 
         win = tk.Toplevel(self.root)
         win.title(f"Edit Concert - Set {set_id}")
-        win.geometry("1100x600")
+        win.geometry("1250x600")
 
         # ---------------- GET CONCERT LIST ---------------- #
         c.execute("SELECT music_id FROM live_data WHERE has_live=1 ORDER BY music_id")
         music_ids = [r[0] for r in c.fetchall()]
-
+        c.execute("SELECT music_id FROM live_data WHERE music_type=99")
+        music_ids_backdance = [r[0] for r in c.fetchall()]
+        collected_music_id = music_ids + music_ids_backdance
+        
         concert_options = []
         concert_map = {}
 
-        for mid in music_ids:
+        for mid in collected_music_id:
             c.execute("SELECT text FROM text_data WHERE category=16 AND `index`=?", (mid,))
             name = c.fetchone()
             name_og = name[0] if name else "Unknown"
@@ -861,7 +866,7 @@ class ModLoaderGUI:
             c.execute("""
                 SELECT live_member_number 
                 FROM live_data 
-                WHERE music_id=? AND has_live=1
+                WHERE music_id=?
             """, (music_id,))
             row = c.fetchone()
 
@@ -871,36 +876,98 @@ class ModLoaderGUI:
             member_count = row[0]
 
             for i in range(1, member_count + 1):
+
                 r = tk.Frame(table_frame)
                 r.pack(fill="x", pady=2)
 
                 tk.Label(r, text=f"{i}", width=5).pack(side="left")
 
-                # chara (LEFT) → dress 100000+
-                chara_var = tk.StringVar(value=dress_options[0])
-                ttk.Combobox(
-                    r, textvariable=chara_var,
-                    values=dress_options,
-                    state="readonly", width=50
-                ).pack(side="left", padx=5)
+                # --- Character ---
+                tk.Label(r, text=f"Chara", width=5).pack(side="left")
+                chara_var = tk.StringVar(value=chara_options[0])
+                chara_combo = ttk.Combobox(
+                    r,
+                    textvariable=chara_var,
+                    values=chara_options,
+                    state="readonly",
+                    width=25
+                )
+                chara_combo.pack(side="left", padx=5)
 
-                # dress (CENTER)
-                dress_var = tk.StringVar(value="Default")
-                ttk.Combobox(
-                    r, textvariable=dress_var,
-                    values=base_options_with_default,
-                    state="readonly", width=50
-                ).pack(side="left", padx=5)
+                # --- Main Dress ---
+                tk.Label(r, text=f"Main Dress", width=10).pack(side="left")
+                dress_var = tk.StringVar()
+                dress_combo = ttk.Combobox(
+                    r,
+                    textvariable=dress_var,
+                    state="readonly",
+                    width=40
+                )
+                dress_combo.pack(side="left", padx=5)
 
-                # vocal (RIGHT)
+                # --- Second Dress ---
+                tk.Label(r, text=f"Second Dress", width=10).pack(side="left")
+                dress2_var = tk.StringVar()
+                dress2_combo = ttk.Combobox(
+                    r,
+                    textvariable=dress2_var,
+                    state="readonly",
+                    width=40
+                )
+                dress2_combo.pack(side="left", padx=5)
+
+                # --- Vocal ---
+                tk.Label(r, text=f"Vocal", width=5).pack(side="left")
                 vocal_var = tk.StringVar(value="Default")
-                ttk.Combobox(
-                    r, textvariable=vocal_var,
+                vocal_combo = ttk.Combobox(
+                    r,
+                    textvariable=vocal_var,
                     values=chara_options_with_default,
-                    state="readonly", width=40
-                ).pack(side="left", padx=5)
+                    state="readonly",
+                    width=25
+                )
+                vocal_combo.pack(side="left", padx=5)
 
-                row_widgets.append((chara_var, dress_var, vocal_var))
+                def update_dress_options(event=None, cv=chara_var, dc=dress_combo, d2c=dress2_combo):
+                    selected = cv.get()
+                    cid = chara_map.get(selected)
+
+                    if not cid:
+                        return
+
+                    c.execute("SELECT id FROM dress_data WHERE id BETWEEN 0 AND 1000 AND use_live=0")
+                    base_ids = [r[0] for r in c.fetchall()]
+
+                    c.execute("SELECT id FROM dress_data WHERE chara_id=?", (cid,))
+                    chara_ids = [r[0] for r in c.fetchall()]
+
+                    ids = base_ids + chara_ids
+
+                    options = []
+                    for did in ids:
+                        c.execute("SELECT text FROM text_data WHERE category=14 AND `index`=?", (did,))
+                        name = c.fetchone()
+                        name_og = name[0] if name else "Unknown"
+                        name = self.hachimi_translation_redirect(14, did, name_og)
+                        c.execute("SELECT text FROM text_data WHERE category=15 AND `index`=?", (did,))
+                        detail = c.fetchone()
+                        detail_og = detail[0] if detail else ""
+                        detail = self.hachimi_translation_redirect(15, did, detail_og)
+                        options.append(f"{did} - {name} - {detail}")
+
+                    if not options:
+                        options = ["None"]
+
+                    dc["values"] = options
+                    d2c["values"] = options
+
+                    dc.set(options[-1])
+                    d2c.set(options[-1])
+
+                chara_combo.bind("<<ComboboxSelected>>", update_dress_options)
+                update_dress_options()
+
+                row_widgets.append((chara_var, dress_var, dress2_var, vocal_var))
 
         # trigger rebuild
         def save_concert():
@@ -918,9 +985,11 @@ class ModLoaderGUI:
             max_id = c.fetchone()[0] or 0
             next_id = max_id + 1
 
-            for idx, (chara_var, dress_var, vocal_var) in enumerate(row_widgets, start=1):
+            for idx, (chara_var, dress_var, dress2_var, vocal_var) in enumerate(row_widgets, start=1):
 
-                chara_id, dress_id, vocal_id = get_values(chara_var, dress_var, vocal_var)
+                chara_id, dress_id, second_dress_id, vocal_id = get_values(
+                    chara_var, dress_var, dress2_var, vocal_var
+                )
 
                 c.execute("""
                     INSERT INTO story_live_position (
@@ -930,7 +999,7 @@ class ModLoaderGUI:
                         second_dress_id, second_dress_color,
                         vocal_chara_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?)
                 """, (
                     next_id,
                     set_id,
@@ -939,6 +1008,7 @@ class ModLoaderGUI:
                     1,
                     chara_id,
                     dress_id,
+                    second_dress_id,
                     vocal_id
                 ))
 
@@ -946,8 +1016,8 @@ class ModLoaderGUI:
 
             conn.commit()
             messagebox.showinfo("Done", "Concert saved.")
+            
         music_combo.bind("<<ComboboxSelected>>", rebuild_rows)
-
         # initial build
         rebuild_rows()
         tk.Button(win, text="Save", command=save_concert).pack(pady=10)     
@@ -2540,37 +2610,82 @@ class ModLoaderGUI:
         self.assets_load_btn.config(state="normal" if assets_exist else "disabled")
         #self.assets_unload_btn.config(state="normal" if assets_exist else "disabled")
 
+    def platform_check_manual(self, base_path):
+        rel_paths = self.scan_full_path(base_path)
+
+        found = {
+            "PC-s": False,
+            "DMM": False,
+            "GLO": False,
+        }
+        for p in rel_paths:
+            parts = p.replace("\\", "/").split("/")
+            for key in found:
+                if key in parts:
+                    found[key] = True
+
+        # ---------------- PLATFORM DETECTED ----------------
+
+        if any(found.values()):
+            # --- PC-s priority ---
+            region_warn = None
+            if found["PC-s"]:
+                return "decrypt", "PC-s"
+
+            # --- DMM / GLO ---
+            if self.region == "Global":
+                if found["GLO"]:
+                    folder_type = "GLO"
+                else:
+                    folder_type = "DMM"
+                    region_warn = "GLO not found but "
+            else:
+                folder_type = "DMM"
+                
+            choice = messagebox.askyesnocancel(
+                "Encryption Check",
+                f"{region_warn}{folder_type} detected.\n\n"
+                "Are these assets already encrypted?"
+            )
+
+            if choice is None:
+                return None
+            if choice:
+                if region_warn is not None:
+                    messagebox.showwarning("Sorry", "can't use encrypted asset for Global")
+                    return None
+                return "direct", folder_type
+            else:
+                return "decrypt", folder_type
+
+        # ---------------- NOT PLATFORM MOD ----------------
+
+        choice = messagebox.askyesnocancel(
+            "Non-platform Mod",
+            "No platform folders detected.\n\n"
+            "Are these assets already encrypted?"
+        )
+
+        if choice is None:
+            return None
+
+        if choice:
+            return "direct", None
+        else:
+            return "decrypt", None
+
     def load_assets_manual(self):
         path = filedialog.askdirectory(title="Select Asset Folder")
         if not path:
             return
 
-        has_pcs = messagebox.askyesnocancel(
-            "Ask",
-            "Does the mod contain Unencrypted PC assets (PC-s)?"
-        )
+        result = self.platform_check_manual(path)
 
-        if has_pcs is None:
+        if result is None:
             return
 
-        if has_pcs:
-            mode = "decrypt"
-            filter_folder = "PC-s"
-        else:
-            is_mod_encrypted = messagebox.askyesnocancel(
-                "Ask",
-                "Are these assets already encrypted / made for engine update?"
-            )
-
-            if is_mod_encrypted is None:
-                return
-
-            if is_mod_encrypted:
-                mode = "direct"
-            else:
-                mode = "decrypt"
-                filter_folder = "DMM"
-                        
+        mode, filter_folder = result     
+        
         # ---------------- LOAD ---------------- if is_mod_encrypted is true
         confirm = messagebox.askyesno(
             "Confirm",
@@ -2582,6 +2697,15 @@ class ModLoaderGUI:
             
         if mode == "direct":
             rel_paths = self.scan_full_path(path)
+            
+            if filter_folder:
+                filtered = []
+                for p in rel_paths:
+                    parts = p.replace("\\", "/").split("/")
+                    if filter_folder in parts:
+                        filtered.append(p)
+                rel_paths = filtered
+                
             assets = [os.path.join(path, p) for p in rel_paths]
 
             if not assets:
