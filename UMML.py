@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 import sys
+import random
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, colorchooser
 import sqlite3
@@ -10,7 +11,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.4.3fix"
+modloader_version = "1.4.4-NPC"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -735,11 +736,12 @@ class ModLoaderGUI:
                 second_dress_id = int(dress2_label.split(" - ")[0])
 
             # --- vocal ---
-            if vocal_var.get() == "Default":
-                vocal_id = chara_id
-            else:
-                vocal_id = chara_map.get(vocal_var.get(), 0)
+            vocal_label = vocal_var.get()
 
+            if vocal_label == "Auto":
+                vocal_id = 0
+            else:
+                vocal_id = chara_map.get(vocal_label, 0)
             return chara_id, dress_id, second_dress_id, vocal_id
 
         
@@ -879,11 +881,40 @@ class ModLoaderGUI:
 
                 # --- Vocal ---
                 tk.Label(r, text=f"Vocal", width=5).pack(side="left")
-                vocal_var = tk.StringVar(value="Default")
+                # --- GET AVAILABLE VOCALS ---
+                conn_meta = sqlite3.connect(self.meta_path)
+                c_meta = conn_meta.cursor()
+
+                like_pattern = f"sound/l/{music_id}/snd_bgm_live_{music_id}_chara_%"
+
+                c_meta.execute('SELECT n FROM a WHERE n LIKE ?', (like_pattern,))
+                rows = c_meta.fetchall()
+
+                available_vocal_ids = set()
+
+                for (path,) in rows:
+                    try:
+                        part = path.split("_chara_")[1]
+                        cid = int(part.split("_")[0])
+                        available_vocal_ids.add(cid)
+                    except:
+                        continue
+
+                conn_meta.close()
+
+                # map to dropdown labels
+                filtered_vocal_options = ["Auto"]
+                filtered_vocal_map = {}
+                for label, cid in chara_map.items():
+                    if cid in available_vocal_ids:
+                        filtered_vocal_options.append(label)
+                        filtered_vocal_map[label] = cid
+
+                vocal_var = tk.StringVar(value="Auto")
                 vocal_combo = ttk.Combobox(
                     r,
                     textvariable=vocal_var,
-                    values=chara_options_with_default,
+                    values=filtered_vocal_options,
                     state="readonly",
                     width=25
                 )
@@ -927,7 +958,6 @@ class ModLoaderGUI:
 
                     dc.set(options[-1])
                     d2c.set(options[-1])
-
                 chara_combo.bind("<<ComboboxSelected>>", update_dress_options)
                 update_dress_options()
 
