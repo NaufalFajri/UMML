@@ -2,7 +2,9 @@ import os
 import json
 import shutil
 import sys
+import random
 import tkinter as tk
+import hashlib
 from tkinter import filedialog, messagebox, ttk, colorchooser
 import sqlite3
 import subprocess
@@ -10,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.4.3fix"
+modloader_version = "1.4.5"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -151,7 +153,7 @@ def load_settings():
     steam_game_path_jpn = find_game_path(3564400)
     steam_game_path_en = find_game_path(3224770)
     dmm_game_path_jpn = find_dmm_umamusume()
-
+    game_dir = None
     base_path_steam_en = (
         Path.home()
         / "AppData"
@@ -159,8 +161,8 @@ def load_settings():
         / "Cygames"
         / "umamusume"
     )
-    game_dir = steam_game_path_en
     print(f"Steam EN path: {base_path_steam_en}")
+    
     base_path_steam_jp = None
     if steam_game_path_jpn:
         base_path_steam_jp = (
@@ -168,7 +170,7 @@ def load_settings():
             / "UmamusumePrettyDerby_Jpn_Data"
             / "Persistent"
         )
-        game_dir = steam_game_path_jpn
+        
     print(f"Steam JP path: {base_path_steam_jp}")
     base_path_dmm_jp = None
     if dmm_game_path_jpn:
@@ -177,7 +179,7 @@ def load_settings():
             / "umamusume_Data"
             / "Persistent"
         )
-        game_dir = dmm_game_path_jpn
+        
     print(f"DMM Game path: {dmm_game_path_jpn}")
     root = tk.Tk()
     root.withdraw()
@@ -202,6 +204,7 @@ def load_settings():
     # --------------------
     if choice_region:
         base_path = base_path_steam_en
+        game_dir = steam_game_path_en
         region = "Global"
 
     # --------------------
@@ -219,8 +222,10 @@ def load_settings():
 
         if choice_platform:  # DMM
             base_path = base_path_dmm_jp
+            game_dir = dmm_game_path_jpn
         else:  # Steam
             base_path = base_path_steam_jp
+            game_dir = steam_game_path_jpn
 
         region = "Japan"
 
@@ -239,27 +244,24 @@ def load_settings():
 
     dat = os.path.join(base_path, "dat")
     backup = os.path.join(base_path, "dat.backup")
-
+    print(f"Game Directory path: {game_dir}")
     return dat, backup, region, game_dir
     
 # using ref from noccu/hachimi-tools
 def load_or_decrypt_meta_simple(dat_path, region):
     base_path = os.path.dirname(dat_path)
-    meta_enc = os.path.join(base_path, "meta")
+    meta_path = os.path.join(base_path, "meta")
 
-    if not os.path.isfile(meta_enc):
+    if not os.path.isfile(meta_path):
         raise RuntimeError("meta file not found")
 
-    # decrypted filename tied to meta size (auto update)
-    size = os.path.getsize(meta_enc)
-    meta_dec = os.path.join(base_path, f"meta_decrypted_{size}")
-
-    # correct DB keys
+    # ---------------- DB KEYS ---------------- #
     DB_KEY_GLOBAL = "a713a5c79dbc9497c0a88669"
     DB_KEY_JP = "9c2bab97bcf8c0c4f1a9ea7881a213f6c9ebf9d8d4c6a8e43ce5a259bde7e9fd"
 
     DB_KEY = DB_KEY_GLOBAL if region == "Global" else DB_KEY_JP
 
+    # ---------------- HELPERS ---------------- #
     def can_open_plain(path):
         try:
             conn = apsw.Connection(path)
@@ -269,29 +271,105 @@ def load_or_decrypt_meta_simple(dat_path, region):
         except Exception:
             return False
 
-    # already decrypted / usable
-    if can_open_plain(meta_enc):
-        print("Meta already usable")
-        return meta_enc
+    def make_cache_id(path):
+        """
+        Fast fingerprint:
+        filesize + modified time + first 1MB hash
+        """
+        stat = os.stat(path)
 
-    # decrypted cache exists
-    if os.path.isfile(meta_dec):
+        h = hashlib.sha1()
+
+        with open(path, "rb") as f:
+            h.update(f.read(1024 * 1024))  # first 1MB only
+
+        digest = h.hexdigest()[:12]
+
+        return f"{stat.st_size}_{int(stat.st_mtime)}_{digest}"
+
+    def is_valid_sqlite(path):
+        if not os.path.isfile(path):
+            return False
+
+        try:
+            conn = apsw.Connection(path)
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1")
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    # ---------------- ALREADY PLAIN ---------------- #
+    if can_open_plain(meta_path):
+        print("Meta already usable")
+
+        backup_path = meta_path + ".bak"
+
+        def get_a_count(path):
+            try:
+                conn = apsw.Connection(path)
+                count = conn.execute(
+                    'SELECT COUNT(i) FROM a'
+                ).fetchone()[0]
+                conn.close()
+                return count
+            except Exception:
+                return -1
+
+        current_count = get_a_count(meta_path)
+
+        backup_needed = False
+
+        # no backup exists
+        if not os.path.isfile(backup_path):
+            backup_needed = True
+
+        else:
+            backup_count = get_a_count(backup_path)
+
+            # changed database
+            if current_count != backup_count:
+                backup_needed = True
+
+        if backup_needed:
+            shutil.copy2(meta_path, backup_path)
+            print("Meta backup updated")
+        else:
+            print("Meta backup unchanged")
+
+        return meta_path
+
+    # ---------------- CACHE NAME ---------------- #
+    cache_id = make_cache_id(meta_path)
+    meta_dec = os.path.join(base_path, f"meta_decrypted_{cache_id}.db")
+
+    # ---------------- VALID CACHE ---------------- #
+    if is_valid_sqlite(meta_dec):
         print("Using cached decrypted meta")
         return meta_dec
 
     print("Decrypting meta database...")
 
     try:
-        # open encrypted DB
-        uri = f"file:{meta_enc}?hexkey={DB_KEY}"
-        conn = apsw.Connection(uri, apsw.SQLITE_OPEN_URI | apsw.SQLITE_OPEN_READONLY)
+        uri = f"file:{meta_path}?hexkey={DB_KEY}"
 
-        # export decrypted copy
+        conn = apsw.Connection(
+            uri,
+            apsw.SQLITE_OPEN_URI | apsw.SQLITE_OPEN_READONLY
+        )
+
+        # cleanup broken cache
+        if os.path.exists(meta_dec):
+            os.remove(meta_dec)
+
         conn.execute(f"VACUUM INTO 'file:{meta_dec}?key='")
         conn.close()
 
     except Exception as e:
         raise RuntimeError(f"Meta decryption failed: {e}")
+
+    if not is_valid_sqlite(meta_dec):
+        raise RuntimeError("Decrypted meta validation failed")
 
     return meta_dec
     
@@ -667,13 +745,8 @@ class ModLoaderGUI:
             c.execute("""
                 SELECT id
                 FROM main_story_data
-                WHERE story_type_1=2 AND story_id_1=?
-                   OR story_type_2=2 AND story_id_2=?
-                   OR story_type_3=2 AND story_id_3=?
-                   OR story_type_4=2 AND story_id_4=?
-                   OR story_type_5=2 AND story_id_5=?
-                LIMIT 1
-            """, (set_id, set_id, set_id, set_id, set_id))
+                WHERE id = ? AND story_type_1 != 4
+            """, (set_id,))
 
             row = c.fetchone()
             if not row:
@@ -693,16 +766,155 @@ class ModLoaderGUI:
             return f"{set_id} - {name}"
         db_path = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
 
+        def validate_and_open_concert(set_id):
+            # get current story info
+            c.execute("""
+                SELECT part_id, id
+                FROM main_story_data
+                WHERE id=?
+            """, (set_id,))
+
+            row = c.fetchone()
+            if not row:
+                return
+
+            part_id, current_id = row
+
+            # check previous story
+            c.execute("""
+                SELECT story_type_1
+                FROM main_story_data
+                WHERE part_id=? AND id < ?
+                ORDER BY id DESC
+                LIMIT 1
+            """, (part_id, current_id))
+
+            prev_row = c.fetchone()
+
+            # check next story
+            c.execute("""
+                SELECT story_type_1
+                FROM main_story_data
+                WHERE part_id=? AND id > ?
+                ORDER BY id ASC
+                LIMIT 1
+            """, (part_id, current_id))
+
+            next_row = c.fetchone()
+
+            prev_is_concert = prev_row and prev_row[0] == 2
+            next_is_concert = next_row and next_row[0] == 2
+
+            if prev_is_concert or next_is_concert:
+                messagebox.showerror(
+                    "Cannot Setup Concert",
+                    "Cannot setup concert.\n\n"
+                    "A nearby story already contains a concert.\n"
+                    "Please restore data first to avoid story progression issues."
+                )
+                return
+
+            self.open_edit_concert(set_id)
+        
+        def reset_story_concert(set_id):
+            result = messagebox.askyesno(
+                "Confirm Restore",
+                f"Restore story data {set_id} from backup?"
+            )
+
+            if not result:
+                return
+
+            c.execute("""
+                SELECT
+                    story_type_1, story_id_1,
+                    story_type_2, story_id_2,
+                    story_type_3, story_id_3,
+                    story_type_4, story_id_4,
+                    story_type_5, story_id_5
+                FROM main_story_data_bak
+                WHERE id=?
+            """, (set_id,))
+
+            row = c.fetchone()
+
+            if not row:
+                messagebox.showerror("Error", "Backup not found.")
+                return
+
+            c.execute("""
+                UPDATE main_story_data
+                SET
+                    story_type_1=?,
+                    story_id_1=?,
+                    story_type_2=?,
+                    story_id_2=?,
+                    story_type_3=?,
+                    story_id_3=?,
+                    story_type_4=?,
+                    story_id_4=?,
+                    story_type_5=?,
+                    story_id_5=?
+                WHERE id=?
+            """, (*row, set_id))
+
+            conn.commit()
+            messagebox.showinfo("Done", f"Story {set_id} restored.")
+            
+        def reset_all_story_concert():
+            result = messagebox.askyesno(
+                "Confirm Restore All",
+                "Restore ALL story data from backup?"
+            )
+
+            if not result:
+                return
+
+            c.execute("""
+                SELECT
+                    id,
+                    story_type_1, story_id_1,
+                    story_type_2, story_id_2,
+                    story_type_3, story_id_3,
+                    story_type_4, story_id_4,
+                    story_type_5, story_id_5
+                FROM main_story_data_bak
+            """)
+
+            rows = c.fetchall()
+
+            for row in rows:
+                set_id = row[0]
+                values = row[1:]
+
+                c.execute("""
+                    UPDATE main_story_data
+                    SET
+                        story_type_1=?,
+                        story_id_1=?,
+                        story_type_2=?,
+                        story_id_2=?,
+                        story_type_3=?,
+                        story_id_3=?,
+                        story_type_4=?,
+                        story_id_4=?,
+                        story_type_5=?,
+                        story_id_5=?
+                    WHERE id=?
+                """, (*values, set_id))
+
+            conn.commit()
+            messagebox.showinfo("Done", "All story data restored.")
+            
         if not os.path.isfile(db_path):
             messagebox.showerror("Error", "master.mdb not found")
             return
 
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-
         win = tk.Toplevel(self.root)
         win.title("Story Concert")
-        win.geometry("400x500")
+        win.geometry("600x500")
 
         canvas = tk.Canvas(win)
         scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
@@ -715,13 +927,27 @@ class ModLoaderGUI:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-
         self.bind_mouse_scroll(win, canvas)
 
-        # --- get set_id list ---
-        c.execute("SELECT DISTINCT set_id FROM story_live_position ORDER BY set_id")
-        set_ids = [row[0] for row in c.fetchall()]
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS main_story_data_bak AS
+            SELECT * FROM main_story_data
+        """)
+        # --- get story ids from main_story_data ---
+        c.execute("""
+            SELECT id
+            FROM main_story_data
+            WHERE
+            story_type_1 != 4
+            ORDER BY id
+        """)
 
+        set_ids = [row[0] for row in c.fetchall()]
+        tk.Button(
+            win,
+            text="Restore All",
+            command=reset_all_story_concert
+        ).pack(pady=5)
         for set_id in set_ids:
             row_frame = tk.Frame(frame)
             row_frame.pack(fill="x", pady=2)
@@ -729,41 +955,78 @@ class ModLoaderGUI:
             display_text = get_story_display_name(c, set_id)
 
             tk.Label(row_frame, text=display_text, width=40, anchor="w").pack(side="left")
-
             tk.Button(
                 row_frame,
-                text="Edit Concert",
-                command=lambda sid=set_id: self.open_edit_concert(sid)
+                text="Restore Data",
+                command=lambda sid=set_id: reset_story_concert(sid)
             ).pack(side="left", padx=5)
-
-        conn.close()
+            tk.Button(
+                row_frame,
+                text="Set Concert",
+                command=lambda sid=set_id: validate_and_open_concert(sid)
+            ).pack(side="left", padx=5)
 
     def open_edit_concert(self, set_id):
         
         def get_values(chara_var, dress_var, dress2_var, vocal_var):
             # --- chara ---
             chara_label = chara_var.get()
-            chara_id = chara_map.get(chara_label, 0)
 
-            # --- main dress ---
+            if "[NPC]" in chara_label:
+                chara_type = 2
+                chara_id = mob_map.get(chara_label, 0)
+            else:
+                chara_type = 1
+                chara_id = chara_map.get(chara_label, 0)
+                
+            # ---------------- MAIN DRESS ---------------- #
             dress_label = dress_var.get()
+
             dress_id = 0
+            dress_color = 0
+
             if dress_label and dress_label != "None":
                 dress_id = int(dress_label.split(" - ")[0])
 
-            # --- second dress ---
+                if "[Color " in dress_label:
+                    dress_color = int(
+                        dress_label.split("[Color ")[1]
+                        .split("]")[0]
+                    )
+
+            # ---------------- SECOND DRESS ---------------- #
             dress2_label = dress2_var.get()
+
             second_dress_id = 0
+            second_dress_color = 0
+
             if dress2_label and dress2_label != "None":
-                second_dress_id = int(dress2_label.split(" - ")[0])
+                second_dress_id = int(
+                    dress2_label.split(" - ")[0]
+                )
+
+                if "[Color " in dress2_label:
+                    second_dress_color = int(
+                        dress2_label.split("[Color ")[1]
+                        .split("]")[0]
+                    )
 
             # --- vocal ---
-            if vocal_var.get() == "Default":
-                vocal_id = chara_id
-            else:
-                vocal_id = chara_map.get(vocal_var.get(), 0)
+            vocal_label = vocal_var.get()
 
-            return chara_id, dress_id, second_dress_id, vocal_id
+            if vocal_label == "Random":
+                vocal_id = 0
+            else:
+                vocal_id = chara_map.get(vocal_label, 0)
+            return (
+                chara_type,
+                chara_id,
+                dress_id,
+                dress_color,
+                second_dress_id,
+                second_dress_color,
+                vocal_id
+            )
 
         
         db_path = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
@@ -773,7 +1036,7 @@ class ModLoaderGUI:
 
         win = tk.Toplevel(self.root)
         win.title(f"Edit Concert - Set {set_id}")
-        win.geometry("1250x600")
+        win.geometry("1500x600")
 
         # ---------------- GET CONCERT LIST ---------------- #
         c.execute("SELECT music_id FROM live_data WHERE has_live=1 ORDER BY music_id")
@@ -812,6 +1075,35 @@ class ModLoaderGUI:
             chara_options.append(label)
             chara_map[label] = cid
 
+        # --- NPC ---
+        c.execute("SELECT mob_id FROM mob_data ORDER BY mob_id")
+        mob_ids = [r[0] for r in c.fetchall()]
+
+        mob_map = {}
+
+        for cid in mob_ids:
+            c.execute("""
+                SELECT text
+                FROM text_data
+                WHERE category=59 AND `index`=?
+            """, (cid,))
+
+            name = c.fetchone()
+            name_og = name[0] if name else f"NPC {cid}"
+            name = self.hachimi_translation_redirect(
+                59,
+                cid,
+                name_og
+            )
+
+            label = f"{cid} - [NPC] {name}"
+
+            # add directly to chara dropdown
+            chara_options.append(label)
+
+            # separate map for save logic
+            mob_map[label] = cid
+            
         # ---------------- TOP CONTROLS ---------------- #
         top = tk.Frame(win)
         top.pack(fill="x", pady=5)
@@ -821,7 +1113,7 @@ class ModLoaderGUI:
         music_var = tk.StringVar(value=concert_options[0] if concert_options else "")
         music_combo = ttk.Combobox(top, textvariable=music_var, values=concert_options, state="readonly", width=50)
         music_combo.pack(side="left", padx=5)
-
+        music_var.set(random.choice(concert_options))
         # ---------------- SCROLL AREA ---------------- #
         canvas = tk.Canvas(win)
         scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
@@ -837,7 +1129,6 @@ class ModLoaderGUI:
         self.bind_mouse_scroll(win, canvas)
 
         # ---------------- BUILD ROWS ---------------- #
-        chara_options_with_default = ["Default"] + chara_options
         row_widgets = []
         def rebuild_rows(*args):
             row_widgets.clear()
@@ -876,10 +1167,10 @@ class ModLoaderGUI:
                     textvariable=chara_var,
                     values=chara_options,
                     state="readonly",
-                    width=25
+                    width=35
                 )
                 chara_combo.pack(side="left", padx=5)
-
+                chara_var.set(random.choice(chara_options))
                 # --- Main Dress ---
                 tk.Label(r, text=f"Main Dress", width=10).pack(side="left")
                 dress_var = tk.StringVar()
@@ -887,7 +1178,7 @@ class ModLoaderGUI:
                     r,
                     textvariable=dress_var,
                     state="readonly",
-                    width=40
+                    width=55
                 )
                 dress_combo.pack(side="left", padx=5)
 
@@ -898,28 +1189,55 @@ class ModLoaderGUI:
                     r,
                     textvariable=dress2_var,
                     state="readonly",
-                    width=40
+                    width=55
                 )
                 dress2_combo.pack(side="left", padx=5)
 
                 # --- Vocal ---
-                tk.Label(r, text=f"Vocal", width=5).pack(side="left")
-                vocal_var = tk.StringVar(value="Default")
+                vocal_label = tk.Label(r, text="Vocal", width=5)
+                vocal_label.pack(side="left")
+                # --- GET AVAILABLE VOCALS ---
+                conn_meta = sqlite3.connect(self.meta_path)
+                c_meta = conn_meta.cursor()
+
+                like_pattern = f"sound/l/{music_id}/snd_bgm_live_{music_id}_chara_%"
+
+                c_meta.execute('SELECT n FROM a WHERE n LIKE ?', (like_pattern,))
+                rows = c_meta.fetchall()
+
+                available_vocal_ids = set()
+
+                for (path,) in rows:
+                    try:
+                        part = path.split("_chara_")[1]
+                        cid = int(part.split("_")[0])
+                        available_vocal_ids.add(cid)
+                    except:
+                        continue
+
+                conn_meta.close()
+
+                # map to dropdown labels
+                filtered_vocal_options = []
+                filtered_vocal_map = {}
+                for label, cid in chara_map.items():
+                    if cid in available_vocal_ids:
+                        filtered_vocal_options.append(label)
+                        filtered_vocal_map[label] = cid
+                vocal_options = ["Auto"] + filtered_vocal_options
+                vocal_var = tk.StringVar(value="Auto")
                 vocal_combo = ttk.Combobox(
                     r,
                     textvariable=vocal_var,
-                    values=chara_options_with_default,
+                    values=vocal_options,
                     state="readonly",
                     width=25
                 )
                 vocal_combo.pack(side="left", padx=5)
 
-                def update_dress_options(event=None, cv=chara_var, dc=dress_combo, d2c=dress2_combo):
+                def update_dress_options(event=None, cv=chara_var, dc=dress_combo, d2c=dress2_combo, vc=vocal_combo, vv=vocal_var, vl=vocal_label, vocal_ids=available_vocal_ids, filtered_options=filtered_vocal_options):
                     selected = cv.get()
                     cid = chara_map.get(selected)
-
-                    if not cid:
-                        return
 
                     c.execute("SELECT id FROM dress_data WHERE id BETWEEN 0 AND 1000")
                     base_ids = [r[0] for r in c.fetchall()]
@@ -931,18 +1249,47 @@ class ModLoaderGUI:
                     chara_ids = [r[0] for r in c.fetchall()]
 
                     ids = base_ids + casual_chara_ids + chara_ids
+                    selected_label = cv.get()
+                    selected_cid = chara_map.get(selected_label)
 
+                    if selected_cid in vocal_ids:
+                        # chara already has vocal for this concert
+                        vc.pack_forget()
+                        vl.pack_forget()
+                        vv.set("Random")  # saved as 0
+                    else:
+                        # show dropdown for override
+                        if not vl.winfo_ismapped():
+                            vl.pack(side="left")
+
+                        if not vc.winfo_ismapped():
+                            vc.pack(side="left", padx=5)
+
+                        vc["values"] = ["Random"] + filtered_options
+                        vv.set("Random")
+                        
                     options = []
                     for did in ids:
                         c.execute("SELECT text FROM text_data WHERE category=14 AND `index`=?", (did,))
                         name = c.fetchone()
                         name_og = name[0] if name else "Unknown"
                         name = self.hachimi_translation_redirect(14, did, name_og)
-                        c.execute("SELECT text FROM text_data WHERE category=15 AND `index`=?", (did,))
-                        detail = c.fetchone()
-                        detail_og = detail[0] if detail else ""
-                        detail = self.hachimi_translation_redirect(15, did, detail_og)
-                        options.append(f"{did} - {name} - {detail}")
+                        c.execute(
+                            "SELECT color_num FROM dress_data WHERE id=?",
+                            (did,)
+                        )
+                        color_row = c.fetchone()
+                        color_num = color_row[0] if color_row else 1
+
+                        if color_num <= 1:
+                            options.append(
+                                f"{did} - {name}"
+                            )
+                        else:
+                            for color in range(color_num):
+                                options.append(
+                                    f"{did} - {name} [Color {color}]"
+                                )
 
                     if not options:
                         options = ["None"]
@@ -951,7 +1298,8 @@ class ModLoaderGUI:
                     d2c["values"] = options
 
                     dc.set(options[-1])
-                    d2c.set(options[-1])
+                    d2c.set(options[11])
+
 
                 chara_combo.bind("<<ComboboxSelected>>", update_dress_options)
                 update_dress_options()
@@ -965,10 +1313,35 @@ class ModLoaderGUI:
 
             if not music_id:
                 return
+                
+            result = messagebox.askyesno(
+                "Confirm Concert Setup",
+                "This will go straight to the concert.\n"
+                "Make sure you read the story before setup concert.\n\n"
+                "Do NOT view a story that continues into another concert.\n"
+                "Continue?"
+            )
 
-            # delete old
-            c.execute("DELETE FROM story_live_position WHERE set_id=?", (set_id,))
-
+            if not result:
+                return
+                
+            c.execute("UPDATE dress_data SET use_live = 1 WHERE use_live = 0")
+            c.execute("DELETE FROM story_live_position WHERE set_id=?", (set_id,)) # update
+            c.execute("""
+                UPDATE main_story_data 
+                SET 
+                    story_type_1 = 2,
+                    story_id_1 = ?,
+                    story_type_2 = 0,
+                    story_id_2 = 0,
+                    story_type_3 = 0,
+                    story_id_3 = 0,
+                    story_type_4 = 0,
+                    story_id_4 = 0,
+                    story_type_5 = 0,
+                    story_id_5 = 0
+                WHERE id = ?
+            """, (set_id, set_id))
             # get next ID
             c.execute("SELECT MAX(id) FROM story_live_position")
             max_id = c.fetchone()[0] or 0
@@ -976,7 +1349,7 @@ class ModLoaderGUI:
 
             for idx, (chara_var, dress_var, dress2_var, vocal_var) in enumerate(row_widgets, start=1):
 
-                chara_id, dress_id, second_dress_id, vocal_id = get_values(
+                chara_type, chara_id, dress_id, dress_color, second_dress_id, second_dress_color, vocal_id = get_values(
                     chara_var, dress_var, dress2_var, vocal_var
                 )
 
@@ -988,16 +1361,18 @@ class ModLoaderGUI:
                         second_dress_id, second_dress_color,
                         vocal_chara_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     next_id,
                     set_id,
                     music_id,
                     idx,
-                    1,
+                    chara_type,
                     chara_id,
                     dress_id,
+                    dress_color,
                     second_dress_id,
+                    second_dress_color,
                     vocal_id
                 ))
 
