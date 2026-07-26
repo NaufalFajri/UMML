@@ -661,12 +661,17 @@ class ModLoaderGUI:
             label="Training",
             command=self.open_training_settings
         )
-        experimental_menu = tk.Menu(misc_menu, tearoff=0)
-        misc_menu.add_cascade(label="EXPERIMENTAL", menu=experimental_menu)
+        dress_tweak_menu = tk.Menu(misc_menu, tearoff=0)
+        misc_menu.add_cascade(label="Dress", menu=dress_tweak_menu)
 
-        experimental_menu.add_command(
-            label="Merge Translation from Global to Japanese",
-            command=self.force_translate_english
+        dress_tweak_menu.add_command(
+            label="Swap Alt to Main",
+            command=self.swap_alt_to_main
+        )
+        
+        dress_tweak_menu.add_command(
+            label="Restore Alt",
+            command=self.restore_alt
         )
         
         modelreplace_menu = tk.Menu(misc_menu, tearoff=0)
@@ -2166,146 +2171,163 @@ class ModLoaderGUI:
             f"{missing_meta} missing in meta."
         )
 
-    def force_translate_english(self):
-        # paths
-        en_base = os.path.join(
-            "C:\\Users", os.getlogin(),
-            "AppData", "LocalLow", "Cygames", "umamusume"
+    def swap_alt_to_main(self):
+        
+        alt_conf = messagebox.askyesno(
+            "Confirm",
+            "if you know then you know."
+            )
+
+        if not alt_conf:
+            return
+            
+        conn = sqlite3.connect(
+            os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
         )
-        jp_base = os.path.dirname(self.dat_path)
 
-        en_db = os.path.join(en_base, "master", "master.mdb")
-        jp_db = os.path.join(jp_base, "master", "master.mdb")
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dress_data_bak AS
+            SELECT * FROM dress_data
+        """)
+        
+        # Get all eligible character IDs
+        c.execute("""
+            SELECT DISTINCT chara_id
+            FROM dress_data
+            WHERE chara_id > 1000
+              AND instr(CAST(condition_type AS TEXT), '6') = 0
+        """)
 
-        if not (os.path.isfile(en_db) and os.path.isfile(jp_db)):
-            messagebox.showerror(
-                "Unavailable",
-                "Both Global and Japan master databases are required."
-            )
+        chara_ids = [row[0] for row in c.fetchall()]
+
+        copy_columns = (
+            "body_type",
+            "body_type_sub",
+            "head_sub_id",
+            "tail_model_id",
+            "tail_model_sub_id",
+        )
+
+        for chara_id in chara_ids:
+            # First dress (smallest ID)
+            c.execute(f"""
+                SELECT id, {', '.join(copy_columns)}
+                FROM dress_data
+                WHERE chara_id=?
+                  AND instr(CAST(condition_type AS TEXT), '6') = 0
+                ORDER BY id
+                LIMIT 1
+            """, (chara_id,))
+
+            row = c.fetchone()
+            if not row:
+                continue
+
+            source_id = row[0]
+            values = row[1:]
+
+            # Copy values to all other dresses
+            c.execute(f"""
+                UPDATE dress_data
+                SET
+                    body_type=?,
+                    body_type_sub=?,
+                    head_sub_id=?,
+                    tail_model_id=?,
+                    tail_model_sub_id=?
+                WHERE chara_id=?
+                  AND id<>?
+                  AND instr(CAST(condition_type AS TEXT), '6') = 0
+            """, (*values, chara_id, source_id))
+
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Done", "you know it")
+        
+    def restore_alt(self):
+        db_path = os.path.join(
+            os.path.dirname(self.dat_path),
+            "master",
+            "master.mdb"
+        )
+
+        if not os.path.isfile(db_path):
+            messagebox.showerror("Error", "master.mdb not found.")
             return
 
-        if not messagebox.askyesno(
-            "Force Translate English",
-            "Multiple Umamusume installations detected.\n\n"
-            "Do you want to load English text from Global\n"
-            "and overwrite Japanese text?\n\n"
-            "This affects ALL text entries."
-        ):
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+
+        # Backup table exists?
+        c.execute("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table'
+              AND name='dress_data_bak'
+        """)
+
+        if not c.fetchone():
+            conn.close()
+            messagebox.showinfo("Restore", "No backup found.")
             return
 
-        try:
-            # backup JP db
-            shutil.copy(jp_db, jp_db + ".bak")
+        restore_conf = messagebox.askyesno(
+            "Confirm",
+            "Restore original dress parameters?"
+        )
 
-            conn_en = sqlite3.connect(en_db)
-            conn_jp = sqlite3.connect(jp_db)
+        if not restore_conf:
+            conn.close()
+            return
 
-            c_en = conn_en.cursor()
-            c_jp = conn_jp.cursor()
+        c.execute("""
+            SELECT
+                id,
+                body_type,
+                body_type_sub,
+                head_sub_id,
+                tail_model_id,
+                tail_model_sub_id
+            FROM dress_data_bak
+            WHERE chara_id > 1000
+              AND instr(CAST(condition_type AS TEXT), '6') = 0
+        """)
 
-            # load EN text
-            c_en.execute("SELECT category, `index`, text FROM text_data")
-            en_map = {
-                (cat, idx): text
-                for cat, idx, text in c_en.fetchall()
-            }
+        rows = c.fetchall()
 
-            # update JP text
-            c_jp.execute("SELECT category, `index` FROM text_data")
-            for cat, idx in c_jp.fetchall():
-                key = (cat, idx)
-                if key in en_map:
-                    c_jp.execute(
-                        "UPDATE text_data SET text=? WHERE category=? AND `index`=?",
-                        (en_map[key], cat, idx)
-                    )
-            # --- character_system_text ---
-            c_en.execute("""
-                SELECT character_id, voice_id, cue_sheet, lip_sync_data, text
-                FROM character_system_text
-            """)
+        for row in rows:
+            (
+                dress_id,
+                body_type,
+                body_type_sub,
+                head_sub_id,
+                tail_model_id,
+                tail_model_sub_id,
+            ) = row
 
-            char_sys_map = {
-                (cid, vid, cue, lip): text
-                for cid, vid, cue, lip, text in c_en.fetchall()
-            }
+            c.execute("""
+                UPDATE dress_data
+                SET
+                    body_type=?,
+                    body_type_sub=?,
+                    head_sub_id=?,
+                    tail_model_id=?,
+                    tail_model_sub_id=?
+                WHERE id=?
+            """, (
+                body_type,
+                body_type_sub,
+                head_sub_id,
+                tail_model_id,
+                tail_model_sub_id,
+                dress_id,
+            ))
 
-            c_jp.execute("""
-                SELECT character_id, voice_id, cue_sheet, lip_sync_data
-                FROM character_system_text
-            """)
+        conn.commit()
+        conn.close()
 
-            for cid, vid, cue, lip in c_jp.fetchall():
-                key = (cid, vid, cue, lip)
-                if key in char_sys_map:
-                    c_jp.execute("""
-                        UPDATE character_system_text
-                        SET text=?
-                        WHERE character_id=? AND voice_id=? AND cue_sheet=? AND lip_sync_data=?
-                    """, (char_sys_map[key], cid, vid, cue, lip))
-                    
-            # --- race_jikkyo_comment ---
-            c_en.execute("""
-                SELECT group_id, voice, message
-                FROM race_jikkyo_comment
-            """)
-
-            jikkyo_comment_map = {
-                (gid, voice): msg
-                for gid, voice, msg in c_en.fetchall()
-            }
-
-            c_jp.execute("""
-                SELECT group_id, voice
-                FROM race_jikkyo_comment
-            """)
-
-            for gid, voice in c_jp.fetchall():
-                key = (gid, voice)
-                if key in jikkyo_comment_map:
-                    c_jp.execute("""
-                        UPDATE race_jikkyo_comment
-                        SET message=?
-                        WHERE group_id=? AND voice=?
-                    """, (jikkyo_comment_map[key], gid, voice))
-                    
-            # --- race_jikkyo_message ---
-            c_en.execute("""
-                SELECT group_id, voice, message
-                FROM race_jikkyo_message
-            """)
-
-            jikkyo_message_map = {
-                (gid, voice): msg
-                for gid, voice, msg in c_en.fetchall()
-            }
-
-            c_jp.execute("""
-                SELECT group_id, voice
-                FROM race_jikkyo_message
-            """)
-
-            for gid, voice in c_jp.fetchall():
-                key = (gid, voice)
-                if key in jikkyo_message_map:
-                    c_jp.execute("""
-                        UPDATE race_jikkyo_message
-                        SET message=?
-                        WHERE group_id=? AND voice=?
-                    """, (jikkyo_message_map[key], gid, voice))
-
-            conn_jp.commit()
-            conn_en.close()
-            conn_jp.close()
-
-            messagebox.showinfo(
-                "Done",
-                "Japanese text has been replaced with English.\n"
-                "A backup was created: master.mdb.bak"
-            )
-
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+        messagebox.showinfo("Done", "Original dress parameters restored.")
 
     def scan_full_path(self, base_path):
         result = []
