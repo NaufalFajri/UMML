@@ -12,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.5.0-hotfix"
+modloader_version = "1.5.1"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -199,6 +199,55 @@ def find_game_path(app_id):
 
     return None
 
+import json
+
+# ---------------------------
+# Fallback
+# ---------------------------
+
+GAME_PATH_JSON = os.path.join("UMML_Data", "GamePath.json")
+
+def normalize_path(path):
+    if not path:
+        return None
+
+    path = path.strip().strip('"').strip("'")
+    path = path.replace("/", os.sep).replace("\\", os.sep)
+    path = os.path.normpath(path)
+
+    return path
+
+def fallback_path(platform, base_path=None, game_dir=None):
+    """
+    Load saved paths if auto-detection failed.
+    """
+
+    if not os.path.isfile(GAME_PATH_JSON):
+        return base_path, game_dir
+
+    try:
+        with open(GAME_PATH_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        info = data.get(platform, {})
+
+        # Persistent folder
+        if base_path is None or not os.path.isdir(base_path):
+            saved = normalize_path(info.get("Persistent_dir", ""))
+            if saved and os.path.isdir(saved):
+                base_path = saved
+
+        # Game folder
+        if game_dir is None or not os.path.isdir(game_dir):
+            saved = normalize_path(info.get("Game_dir", ""))
+            if saved and os.path.isdir(saved):
+                game_dir = saved
+
+    except Exception as e:
+        print(f"Failed to read GamePath.json: {e}")
+
+    return base_path, game_dir
+    
 def load_settings():
     steam_game_path_jpn = find_game_path(3564400)
     steam_game_path_en = find_game_path(3224770)
@@ -331,18 +380,39 @@ def load_settings():
     if platform == "Steam Global":
         base_path = resolve_case_sensitive_path(base_path_steam_en)
         game_dir = resolve_case_sensitive_path(steam_game_path_en)
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
         meta_path_pth = os.path.join(base_path, "meta")
         region = "Global"
 
     elif platform == "Steam Japan":
         base_path = resolve_case_sensitive_path(base_path_steam_jp)
         game_dir = resolve_case_sensitive_path(steam_game_path_jpn)
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
         meta_path_pth = os.path.join(base_path, "meta")
         region = "Japan"
 
     elif platform == "DMM":
         base_path = resolve_case_sensitive_path(base_path_dmm_jp)
         game_dir = resolve_case_sensitive_path(dmm_game_path_jpn)
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
         meta_path_pth = os.path.join(base_path, "meta")
         region = "Japan"
 
@@ -350,6 +420,14 @@ def load_settings():
         # TODO implement
         #base_path = resolve_case_sensitive_path(base_path_dmm_jp)
         #game_dir = Path(komoe_game_path) / "komoemumamusume Game"
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
+        meta_path_pth = os.path.join(game_dir, "meta")
         region = "Korea"
 
     elif platform == "Komoe":
@@ -613,6 +691,11 @@ class ModLoaderGUI:
         tk.Button(mod_frame, text="Browse", command=self.browse_folder).pack(side="left")
         tk.Button(mod_frame, text="Reload", command=self.reload).pack(side="left", padx=5)
         tk.Button(mod_frame, text="Preview", command=self.preview_assets).pack(side="left", padx=5)
+        tk.Button(
+            mod_frame,
+            text="How do I install a mod?",
+            command=self.how_do_i_install_mod
+        ).pack(side="left", padx=5)
         info_frame = tk.LabelFrame(self.root, text="Information")
         info_frame.pack(fill="x", padx=10, pady=5)
         tk.Label(info_frame, textvariable=self.title_text).pack(anchor="w")
@@ -622,9 +705,9 @@ class ModLoaderGUI:
 
         control_frame = tk.LabelFrame(self.root, text="Controls")
         control_frame.pack(fill="x", padx=10, pady=5)
-        self.assets_load_btn = tk.Button(control_frame, text="Load Assets", state="disabled", command=self.load_assets)
+        self.assets_load_btn = tk.Button(control_frame, text="Install Mod", state="disabled", command=self.load_assets)
         self.assets_load_btn.pack(side="left", padx=5)
-        self.assets_load_raw_btn = tk.Button(control_frame, text="Load Assets (manual)", command=self.load_assets_manual)
+        self.assets_load_raw_btn = tk.Button(control_frame, text="Import Asset Folder", command=self.load_assets_manual)
         self.assets_load_raw_btn.pack(side="left", padx=5)
         #self.assets_unload_btn = tk.Button(control_frame, text="Unload Assets", state="disabled", command=self.unload_assets)
         #self.assets_unload_btn.pack(side="left", padx=5)
@@ -719,7 +802,20 @@ class ModLoaderGUI:
             f"Deleted {deleted} unused asset(s).\n"
             f"Failed to delete {failed} asset(s)."
         )
-
+    def how_do_i_install_mod(self):
+        messagebox.showinfo(
+            "How do I install a mod?",
+            "Standard Mod\n"
+            "1. Click Browse.\n"
+            "2. Select the mod folder.\n"
+            "3. Click Install Mod.\n\n"
+            "Other Mod / Optional Mod\n"
+            "If you're installing a mod that isn't packaged for UMML, use Import Asset Folder instead.\n\n"
+            "1. Click Import Asset Folder.\n"
+            "2. Select the mod folder.\n"
+            "3. UMML will automatically detect the mod format and your game platform.\n"
+            "4. Review the detected settings, then click Yes to load the assets."
+        )
     def hachimi_translation_redirect(self, category, index, default_text):
         if not hasattr(self, "hachimi_dict") or not self.hachimi_dict:
             return default_text
@@ -3252,7 +3348,10 @@ class ModLoaderGUI:
             choice = messagebox.askyesnocancel(
                 "Encryption Check",
                 f"{region_warn}{folder_type} detected.\n\n"
-                "Are you loading unencrypted / legacy assets?"
+                "How was this mod created?\n\n"
+                "Yes → Regular mod (encrypt before loading)\n"
+                "No → Already-encrypted asset mod (load directly)\n\n"
+                "If you're not sure, choose ""Yes"". Most mods use this format."
             )
 
             if choice is None:
@@ -3268,9 +3367,11 @@ class ModLoaderGUI:
         # ---------------- NOT PLATFORM MOD ----------------
 
         choice = messagebox.askyesnocancel(
-            "Non-platform Mod",
-            "No platform folders detected.\n\n"
-            "Are you loading unencrypted / legacy assets?"
+            "No Platform Detected",
+            "How was this mod created?\n\n"
+            "Yes → Regular mod (encrypt before loading)\n"
+            "No → Already-encrypted asset mod (load directly)\n\n"
+            "If you're not sure, choose ""Yes"". Most mods use this format."
         )
 
         if choice is None:
