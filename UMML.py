@@ -547,6 +547,27 @@ class ModLoaderGUI:
         self.load_hachimi_dict()
         self.create_widgets()
 
+    def bind_mouse_scroll(self, parent, canvas):
+        def on_mousewheel(event):
+            # prevent scroll hijacking when hovering over dropdowns
+            if getattr(event.widget, "winfo_class", lambda: "")() == "TCombobox":
+                return
+            
+            # Windows / MacOS
+            if event.delta:
+                direction = -1 if event.delta > 0 else 1
+                canvas.yview_scroll(direction, "units")
+            # Linux
+            else:
+                if event.num == 4:
+                    canvas.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    canvas.yview_scroll(1, "units")
+
+        parent.bind("<MouseWheel>", on_mousewheel)
+        parent.bind("<Button-4>", on_mousewheel)
+        parent.bind("<Button-5>", on_mousewheel)  
+
     def create_widgets(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -1174,6 +1195,8 @@ class ModLoaderGUI:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        self.bind_mouse_scroll(win, canvas)
+
         c.execute("""
             CREATE TABLE IF NOT EXISTS main_story_data_bak AS
             SELECT * FROM main_story_data
@@ -1370,6 +1393,8 @@ class ModLoaderGUI:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        self.bind_mouse_scroll(win, canvas)
 
         # ---------------- BUILD ROWS ---------------- #
         row_widgets = []
@@ -2262,6 +2287,8 @@ class ModLoaderGUI:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        self.bind_mouse_scroll(win, canvas)
+
         swap_vars = {}
 
         options = ["None"] + [f"{cid} - {chara_names[cid]}" for cid in chara_ids]
@@ -2401,6 +2428,8 @@ class ModLoaderGUI:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        self.bind_mouse_scroll(win, canvas)
 
         # --- column headers ---
         header = tk.Frame(scroll_frame)
@@ -2642,6 +2671,8 @@ class ModLoaderGUI:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        self.bind_mouse_scroll(win, canvas)
+
         combo_vars = {}
 
         for tid, name_text, current_dress_id, current_cutin_id, cmd_type in training_data:
@@ -2765,6 +2796,8 @@ class ModLoaderGUI:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        self.bind_mouse_scroll(win, canvas)
 
         chara_vars = {}
 
