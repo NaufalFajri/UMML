@@ -12,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.5.1"
+modloader_version = "1.5.2"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -50,7 +50,8 @@ except ImportError:
             "please try again."
         )
         sys.exit(0)
-print(f"{modloader_version}\n")
+print(f"UMML version: {modloader_version}\n")
+print("You are using an improved version of tumugu UMML v1.2.0.\n")
 print("[OK] UnityPy ready")
 print("[OK] vdf ready")
 print("[OK] apsw-sqlite3mc ready")
@@ -93,14 +94,12 @@ def find_dmm_umamusume():
             game_data = json.load(f)
 
         for game in game_data.get("contents", []):
-            if (
-                game.get("productId") == "umamusume"
-                and game.get("detail", {}).get("installed") is True
-            ):
-                path = game.get("detail", {}).get("path")
+            if game.get("productId") != "umamusume":
+                continue
 
-                if path and os.path.isdir(path):
-                    return path
+            path = game.get("detail", {}).get("path")
+            if path and os.path.isdir(path):
+                return path
 
     except Exception as e:
         print(f"DMM detection error: {e}")
@@ -160,16 +159,11 @@ def find_komoe_umamusume():
     try:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall\komoemumamusume"
+            r"Software\komoemumamusume"
         )
 
-        display_icon, _ = winreg.QueryValueEx(key, "DisplayIcon")
+        game_dir_komoe, _ = winreg.QueryValueEx(key, "GameInstallPath")
         winreg.CloseKey(key)
-
-        game_dir_komoe = os.path.join(
-            os.path.dirname(display_icon),
-            "komoemumamusume Game"
-        )
 
         if os.path.isdir(game_dir_komoe):
             return game_dir_komoe
@@ -443,7 +437,9 @@ def load_settings():
         messagebox.showerror(
             "Game Not Found",
             f"Selected {region} version was not found.\n\n"
-            "Please make sure the game is installed and run at least once."
+            "Please make sure the game is installed and run at least once.\n"
+            "If detection still fails, open Command Prompt as administrator"
+            " and run this .py file again."
         )
         sys.exit(1)
     if meta_path_pth is None or not os.path.isfile(meta_path_pth):
@@ -2338,6 +2334,115 @@ class ModLoaderGUI:
                 result.append(rel_path.replace("\\", "/"))
         return result
 
+    def edit_parameter_personality(self, chara_id):
+        db_path = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
+
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Edit Personality Parameter - {chara_id}")
+        win.geometry("700x600")
+
+        # ---------------- Scroll ----------------
+        canvas = tk.Canvas(win)
+        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        frame = tk.Frame(canvas)
+
+        frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row_widgets = []
+
+        # ---------------- Load current personality ----------------
+        c.execute("""
+            SELECT target_scene, target_cut, target_type, value
+            FROM chara_type
+            WHERE chara_id=?
+            ORDER BY target_scene, target_cut, target_type
+        """, (chara_id,))
+
+        rows = c.fetchall()
+
+        for scene, cut, typ, current_value in rows:
+
+            r = tk.Frame(frame)
+            r.pack(fill="x", pady=2)
+
+            tk.Label(
+                r,
+                text=f"Scene {scene} | Cut {cut} | Type {typ}",
+                width=35,
+                anchor="w"
+            ).pack(side="left")
+
+            # available values
+            c.execute("""
+                SELECT DISTINCT value
+                FROM chara_type_bak
+                WHERE target_scene=?
+                  AND target_cut=?
+                  AND target_type=?
+                ORDER BY value
+            """, (scene, cut, typ))
+
+            values = [str(v[0]) for v in c.fetchall()]
+
+            # safety
+            if str(current_value) not in values:
+                values.append(str(current_value))
+                values.sort(key=int)
+
+            value_var = tk.StringVar(value=str(current_value))
+
+            ttk.Combobox(
+                r,
+                textvariable=value_var,
+                values=values,
+                state="readonly",
+                width=10
+            ).pack(side="left", padx=5)
+
+            row_widgets.append((scene, cut, typ, value_var))
+
+        # ---------------- Save ----------------
+        def save_parameter():
+
+            for scene, cut, typ, value_var in row_widgets:
+
+                c.execute("""
+                    UPDATE chara_type
+                    SET value=?
+                    WHERE chara_id=?
+                      AND target_scene=?
+                      AND target_cut=?
+                      AND target_type=?
+                """, (
+                    int(value_var.get()),
+                    chara_id,
+                    scene,
+                    cut,
+                    typ
+                ))
+
+            conn.commit()
+            messagebox.showinfo("Done", "Parameters updated.")
+
+        tk.Button(win, text="Save", command=save_parameter).pack(pady=10)
+
+        win.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: (conn.close(), win.destroy())
+        )
+
     def open_personality_settings(self):
         messagebox.showwarning("Tazuna saying", 
                                "NEVER swap Haru Urara with Smart Falcon!")
@@ -2412,6 +2517,11 @@ class ModLoaderGUI:
             var = tk.StringVar(value="None")
             ttk.Combobox(row, textvariable=var, values=options, state="readonly", width=30).pack(side="left")
             swap_vars[cid] = var
+            tk.Button(
+                row,
+                text="Edit Parameter",
+                command=lambda cid=cid: self.edit_parameter_personality(cid)
+            ).pack(side="left", padx=5)
         # 1212    
         control_row = tk.Frame(win)
         control_row.pack(pady=5)
@@ -3311,7 +3421,12 @@ class ModLoaderGUI:
 
         # --- no config found ---
         else:
-            messagebox.showerror("Error", "No setting.json or setting.yml found.")
+            messagebox.showerror(
+                "Mod Settings Not Found",
+                "No setting.json or setting.yml found.\n\n"
+                "Are you trying to load an Asset Mod?\n"
+                "Use Import Asset Folder instead."
+            )
             self.reset_mod_info()
             return
 
