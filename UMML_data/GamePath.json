@@ -1,0 +1,22 @@
+{
+    "Steam Global": {
+        "Persistent_dir": "D:/SteamLibrary/steamapps/common/UmamusumePrettyDerby/UmamusumePrettyDerby_Data/Persistent",
+        "Game_dir": "D:/SteamLibrary/steamapps/common/UmamusumePrettyDerby"
+    },
+    "Steam Japan": {
+        "Persistent_dir": "D:/SteamLibrary/steamapps/common/UmamusumePrettyDerby_Jpn/UmamusumePrettyDerby_Jpn_Data/Persistent",
+        "Game_dir": "D:/SteamLibrary/steamapps/common/UmamusumePrettyDerby_Jpn"
+    },
+    "DMM": {
+        "Persistent_dir": "D:/DMMGames/umamusume/umamusume_Data/Persistent",
+        "Game_dir": "D:/DMMGames/umamusume"
+    },
+    "Komoe": {
+        "Persistent_dir": "D:/komoemumamusume/komoemumamusume Game/komoeumamusume_Data/Persistent",
+        "Game_dir": "D:/komoemumamusume/komoemamusume Game"
+    },
+    "Kakao": {
+        "Persistent_dir": "D:/This Path Not Exist",
+        "Game_dir": "D:/This Path Not Exist"
+    }
+}

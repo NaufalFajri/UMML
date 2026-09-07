@@ -12,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.5.0-hotfix"
+modloader_version = "1.5.2"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -50,7 +50,8 @@ except ImportError:
             "please try again."
         )
         sys.exit(0)
-print(f"{modloader_version}\n")
+print(f"UMML version: {modloader_version}\n")
+print("You are using an improved version of tumugu UMML v1.2.0.\n")
 print("[OK] UnityPy ready")
 print("[OK] vdf ready")
 print("[OK] apsw-sqlite3mc ready")
@@ -93,14 +94,12 @@ def find_dmm_umamusume():
             game_data = json.load(f)
 
         for game in game_data.get("contents", []):
-            if (
-                game.get("productId") == "umamusume"
-                and game.get("detail", {}).get("installed") is True
-            ):
-                path = game.get("detail", {}).get("path")
+            if game.get("productId") != "umamusume":
+                continue
 
-                if path and os.path.isdir(path):
-                    return path
+            path = game.get("detail", {}).get("path")
+            if path and os.path.isdir(path):
+                return path
 
     except Exception as e:
         print(f"DMM detection error: {e}")
@@ -160,16 +159,11 @@ def find_komoe_umamusume():
     try:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall\komoemumamusume"
+            r"Software\komoemumamusume"
         )
 
-        display_icon, _ = winreg.QueryValueEx(key, "DisplayIcon")
+        game_dir_komoe, _ = winreg.QueryValueEx(key, "GameInstallPath")
         winreg.CloseKey(key)
-
-        game_dir_komoe = os.path.join(
-            os.path.dirname(display_icon),
-            "komoemumamusume Game"
-        )
 
         if os.path.isdir(game_dir_komoe):
             return game_dir_komoe
@@ -199,6 +193,55 @@ def find_game_path(app_id):
 
     return None
 
+import json
+
+# ---------------------------
+# Fallback
+# ---------------------------
+
+GAME_PATH_JSON = os.path.join("UMML_Data", "GamePath.json")
+
+def normalize_path(path):
+    if not path:
+        return None
+
+    path = path.strip().strip('"').strip("'")
+    path = path.replace("/", os.sep).replace("\\", os.sep)
+    path = os.path.normpath(path)
+
+    return path
+
+def fallback_path(platform, base_path=None, game_dir=None):
+    """
+    Load saved paths if auto-detection failed.
+    """
+
+    if not os.path.isfile(GAME_PATH_JSON):
+        return base_path, game_dir
+
+    try:
+        with open(GAME_PATH_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        info = data.get(platform, {})
+
+        # Persistent folder
+        if base_path is None or not os.path.isdir(base_path):
+            saved = normalize_path(info.get("Persistent_dir", ""))
+            if saved and os.path.isdir(saved):
+                base_path = saved
+
+        # Game folder
+        if game_dir is None or not os.path.isdir(game_dir):
+            saved = normalize_path(info.get("Game_dir", ""))
+            if saved and os.path.isdir(saved):
+                game_dir = saved
+
+    except Exception as e:
+        print(f"Failed to read GamePath.json: {e}")
+
+    return base_path, game_dir
+    
 def load_settings():
     steam_game_path_jpn = find_game_path(3564400)
     steam_game_path_en = find_game_path(3224770)
@@ -331,18 +374,39 @@ def load_settings():
     if platform == "Steam Global":
         base_path = resolve_case_sensitive_path(base_path_steam_en)
         game_dir = resolve_case_sensitive_path(steam_game_path_en)
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
         meta_path_pth = os.path.join(base_path, "meta")
         region = "Global"
 
     elif platform == "Steam Japan":
         base_path = resolve_case_sensitive_path(base_path_steam_jp)
         game_dir = resolve_case_sensitive_path(steam_game_path_jpn)
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
         meta_path_pth = os.path.join(base_path, "meta")
         region = "Japan"
 
     elif platform == "DMM":
         base_path = resolve_case_sensitive_path(base_path_dmm_jp)
         game_dir = resolve_case_sensitive_path(dmm_game_path_jpn)
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
         meta_path_pth = os.path.join(base_path, "meta")
         region = "Japan"
 
@@ -350,6 +414,14 @@ def load_settings():
         # TODO implement
         #base_path = resolve_case_sensitive_path(base_path_dmm_jp)
         #game_dir = Path(komoe_game_path) / "komoemumamusume Game"
+        
+        base_path, game_dir = fallback_path(
+            platform,
+            base_path,
+            game_dir
+        )
+        
+        meta_path_pth = os.path.join(game_dir, "meta")
         region = "Korea"
 
     elif platform == "Komoe":
@@ -365,7 +437,9 @@ def load_settings():
         messagebox.showerror(
             "Game Not Found",
             f"Selected {region} version was not found.\n\n"
-            "Please make sure the game is installed and run at least once."
+            "Please make sure the game is installed and run at least once.\n"
+            "If detection still fails, open Command Prompt as administrator"
+            " and run this .py file again."
         )
         sys.exit(1)
     if meta_path_pth is None or not os.path.isfile(meta_path_pth):
@@ -583,12 +657,17 @@ class ModLoaderGUI:
             label="Training",
             command=self.open_training_settings
         )
-        experimental_menu = tk.Menu(misc_menu, tearoff=0)
-        misc_menu.add_cascade(label="EXPERIMENTAL", menu=experimental_menu)
+        dress_tweak_menu = tk.Menu(misc_menu, tearoff=0)
+        misc_menu.add_cascade(label="Dress", menu=dress_tweak_menu)
 
-        experimental_menu.add_command(
-            label="Merge Translation from Global to Japanese",
-            command=self.force_translate_english
+        dress_tweak_menu.add_command(
+            label="Swap Alt to Main",
+            command=self.swap_alt_to_main
+        )
+        
+        dress_tweak_menu.add_command(
+            label="Restore Alt",
+            command=self.restore_alt
         )
         
         modelreplace_menu = tk.Menu(misc_menu, tearoff=0)
@@ -613,6 +692,11 @@ class ModLoaderGUI:
         tk.Button(mod_frame, text="Browse", command=self.browse_folder).pack(side="left")
         tk.Button(mod_frame, text="Reload", command=self.reload).pack(side="left", padx=5)
         tk.Button(mod_frame, text="Preview", command=self.preview_assets).pack(side="left", padx=5)
+        tk.Button(
+            mod_frame,
+            text="How do I install a mod?",
+            command=self.how_do_i_install_mod
+        ).pack(side="left", padx=5)
         info_frame = tk.LabelFrame(self.root, text="Information")
         info_frame.pack(fill="x", padx=10, pady=5)
         tk.Label(info_frame, textvariable=self.title_text).pack(anchor="w")
@@ -622,9 +706,9 @@ class ModLoaderGUI:
 
         control_frame = tk.LabelFrame(self.root, text="Controls")
         control_frame.pack(fill="x", padx=10, pady=5)
-        self.assets_load_btn = tk.Button(control_frame, text="Load Assets", state="disabled", command=self.load_assets)
+        self.assets_load_btn = tk.Button(control_frame, text="Install Mod", state="disabled", command=self.load_assets)
         self.assets_load_btn.pack(side="left", padx=5)
-        self.assets_load_raw_btn = tk.Button(control_frame, text="Load Assets (manual)", command=self.load_assets_manual)
+        self.assets_load_raw_btn = tk.Button(control_frame, text="Import Asset Folder", command=self.load_assets_manual)
         self.assets_load_raw_btn.pack(side="left", padx=5)
         #self.assets_unload_btn = tk.Button(control_frame, text="Unload Assets", state="disabled", command=self.unload_assets)
         #self.assets_unload_btn.pack(side="left", padx=5)
@@ -719,7 +803,20 @@ class ModLoaderGUI:
             f"Deleted {deleted} unused asset(s).\n"
             f"Failed to delete {failed} asset(s)."
         )
-
+    def how_do_i_install_mod(self):
+        messagebox.showinfo(
+            "How do I install a mod?",
+            "Standard Mod\n"
+            "1. Click Browse.\n"
+            "2. Select the mod folder.\n"
+            "3. Click Install Mod.\n\n"
+            "Other Mod / Optional Mod\n"
+            "If you're installing a mod that isn't packaged for UMML, use Import Asset Folder instead.\n\n"
+            "1. Click Import Asset Folder.\n"
+            "2. Select the mod folder.\n"
+            "3. UMML will automatically detect the mod format and your game platform.\n"
+            "4. Review the detected settings, then click Yes to load the assets."
+        )
     def hachimi_translation_redirect(self, category, index, default_text):
         if not hasattr(self, "hachimi_dict") or not self.hachimi_dict:
             return default_text
@@ -2070,146 +2167,163 @@ class ModLoaderGUI:
             f"{missing_meta} missing in meta."
         )
 
-    def force_translate_english(self):
-        # paths
-        en_base = os.path.join(
-            "C:\\Users", os.getlogin(),
-            "AppData", "LocalLow", "Cygames", "umamusume"
+    def swap_alt_to_main(self):
+        
+        alt_conf = messagebox.askyesno(
+            "Confirm",
+            "if you know then you know."
+            )
+
+        if not alt_conf:
+            return
+            
+        conn = sqlite3.connect(
+            os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
         )
-        jp_base = os.path.dirname(self.dat_path)
 
-        en_db = os.path.join(en_base, "master", "master.mdb")
-        jp_db = os.path.join(jp_base, "master", "master.mdb")
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dress_data_bak AS
+            SELECT * FROM dress_data
+        """)
+        
+        # Get all eligible character IDs
+        c.execute("""
+            SELECT DISTINCT chara_id
+            FROM dress_data
+            WHERE chara_id > 1000
+              AND instr(CAST(condition_type AS TEXT), '6') = 0
+        """)
 
-        if not (os.path.isfile(en_db) and os.path.isfile(jp_db)):
-            messagebox.showerror(
-                "Unavailable",
-                "Both Global and Japan master databases are required."
-            )
+        chara_ids = [row[0] for row in c.fetchall()]
+
+        copy_columns = (
+            "body_type",
+            "body_type_sub",
+            "head_sub_id",
+            "tail_model_id",
+            "tail_model_sub_id",
+        )
+
+        for chara_id in chara_ids:
+            # First dress (smallest ID)
+            c.execute(f"""
+                SELECT id, {', '.join(copy_columns)}
+                FROM dress_data
+                WHERE chara_id=?
+                  AND instr(CAST(condition_type AS TEXT), '6') = 0
+                ORDER BY id
+                LIMIT 1
+            """, (chara_id,))
+
+            row = c.fetchone()
+            if not row:
+                continue
+
+            source_id = row[0]
+            values = row[1:]
+
+            # Copy values to all other dresses
+            c.execute(f"""
+                UPDATE dress_data
+                SET
+                    body_type=?,
+                    body_type_sub=?,
+                    head_sub_id=?,
+                    tail_model_id=?,
+                    tail_model_sub_id=?
+                WHERE chara_id=?
+                  AND id<>?
+                  AND instr(CAST(condition_type AS TEXT), '6') = 0
+            """, (*values, chara_id, source_id))
+
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Done", "you know it")
+        
+    def restore_alt(self):
+        db_path = os.path.join(
+            os.path.dirname(self.dat_path),
+            "master",
+            "master.mdb"
+        )
+
+        if not os.path.isfile(db_path):
+            messagebox.showerror("Error", "master.mdb not found.")
             return
 
-        if not messagebox.askyesno(
-            "Force Translate English",
-            "Multiple Umamusume installations detected.\n\n"
-            "Do you want to load English text from Global\n"
-            "and overwrite Japanese text?\n\n"
-            "This affects ALL text entries."
-        ):
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+
+        # Backup table exists?
+        c.execute("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table'
+              AND name='dress_data_bak'
+        """)
+
+        if not c.fetchone():
+            conn.close()
+            messagebox.showinfo("Restore", "No backup found.")
             return
 
-        try:
-            # backup JP db
-            shutil.copy(jp_db, jp_db + ".bak")
+        restore_conf = messagebox.askyesno(
+            "Confirm",
+            "Restore original dress parameters?"
+        )
 
-            conn_en = sqlite3.connect(en_db)
-            conn_jp = sqlite3.connect(jp_db)
+        if not restore_conf:
+            conn.close()
+            return
 
-            c_en = conn_en.cursor()
-            c_jp = conn_jp.cursor()
+        c.execute("""
+            SELECT
+                id,
+                body_type,
+                body_type_sub,
+                head_sub_id,
+                tail_model_id,
+                tail_model_sub_id
+            FROM dress_data_bak
+            WHERE chara_id > 1000
+              AND instr(CAST(condition_type AS TEXT), '6') = 0
+        """)
 
-            # load EN text
-            c_en.execute("SELECT category, `index`, text FROM text_data")
-            en_map = {
-                (cat, idx): text
-                for cat, idx, text in c_en.fetchall()
-            }
+        rows = c.fetchall()
 
-            # update JP text
-            c_jp.execute("SELECT category, `index` FROM text_data")
-            for cat, idx in c_jp.fetchall():
-                key = (cat, idx)
-                if key in en_map:
-                    c_jp.execute(
-                        "UPDATE text_data SET text=? WHERE category=? AND `index`=?",
-                        (en_map[key], cat, idx)
-                    )
-            # --- character_system_text ---
-            c_en.execute("""
-                SELECT character_id, voice_id, cue_sheet, lip_sync_data, text
-                FROM character_system_text
-            """)
+        for row in rows:
+            (
+                dress_id,
+                body_type,
+                body_type_sub,
+                head_sub_id,
+                tail_model_id,
+                tail_model_sub_id,
+            ) = row
 
-            char_sys_map = {
-                (cid, vid, cue, lip): text
-                for cid, vid, cue, lip, text in c_en.fetchall()
-            }
+            c.execute("""
+                UPDATE dress_data
+                SET
+                    body_type=?,
+                    body_type_sub=?,
+                    head_sub_id=?,
+                    tail_model_id=?,
+                    tail_model_sub_id=?
+                WHERE id=?
+            """, (
+                body_type,
+                body_type_sub,
+                head_sub_id,
+                tail_model_id,
+                tail_model_sub_id,
+                dress_id,
+            ))
 
-            c_jp.execute("""
-                SELECT character_id, voice_id, cue_sheet, lip_sync_data
-                FROM character_system_text
-            """)
+        conn.commit()
+        conn.close()
 
-            for cid, vid, cue, lip in c_jp.fetchall():
-                key = (cid, vid, cue, lip)
-                if key in char_sys_map:
-                    c_jp.execute("""
-                        UPDATE character_system_text
-                        SET text=?
-                        WHERE character_id=? AND voice_id=? AND cue_sheet=? AND lip_sync_data=?
-                    """, (char_sys_map[key], cid, vid, cue, lip))
-                    
-            # --- race_jikkyo_comment ---
-            c_en.execute("""
-                SELECT group_id, voice, message
-                FROM race_jikkyo_comment
-            """)
-
-            jikkyo_comment_map = {
-                (gid, voice): msg
-                for gid, voice, msg in c_en.fetchall()
-            }
-
-            c_jp.execute("""
-                SELECT group_id, voice
-                FROM race_jikkyo_comment
-            """)
-
-            for gid, voice in c_jp.fetchall():
-                key = (gid, voice)
-                if key in jikkyo_comment_map:
-                    c_jp.execute("""
-                        UPDATE race_jikkyo_comment
-                        SET message=?
-                        WHERE group_id=? AND voice=?
-                    """, (jikkyo_comment_map[key], gid, voice))
-                    
-            # --- race_jikkyo_message ---
-            c_en.execute("""
-                SELECT group_id, voice, message
-                FROM race_jikkyo_message
-            """)
-
-            jikkyo_message_map = {
-                (gid, voice): msg
-                for gid, voice, msg in c_en.fetchall()
-            }
-
-            c_jp.execute("""
-                SELECT group_id, voice
-                FROM race_jikkyo_message
-            """)
-
-            for gid, voice in c_jp.fetchall():
-                key = (gid, voice)
-                if key in jikkyo_message_map:
-                    c_jp.execute("""
-                        UPDATE race_jikkyo_message
-                        SET message=?
-                        WHERE group_id=? AND voice=?
-                    """, (jikkyo_message_map[key], gid, voice))
-
-            conn_jp.commit()
-            conn_en.close()
-            conn_jp.close()
-
-            messagebox.showinfo(
-                "Done",
-                "Japanese text has been replaced with English.\n"
-                "A backup was created: master.mdb.bak"
-            )
-
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+        messagebox.showinfo("Done", "Original dress parameters restored.")
 
     def scan_full_path(self, base_path):
         result = []
@@ -2219,6 +2333,115 @@ class ModLoaderGUI:
                 rel_path = os.path.relpath(full_path, base_path)
                 result.append(rel_path.replace("\\", "/"))
         return result
+
+    def edit_parameter_personality(self, chara_id):
+        db_path = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
+
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Edit Personality Parameter - {chara_id}")
+        win.geometry("700x600")
+
+        # ---------------- Scroll ----------------
+        canvas = tk.Canvas(win)
+        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        frame = tk.Frame(canvas)
+
+        frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row_widgets = []
+
+        # ---------------- Load current personality ----------------
+        c.execute("""
+            SELECT target_scene, target_cut, target_type, value
+            FROM chara_type
+            WHERE chara_id=?
+            ORDER BY target_scene, target_cut, target_type
+        """, (chara_id,))
+
+        rows = c.fetchall()
+
+        for scene, cut, typ, current_value in rows:
+
+            r = tk.Frame(frame)
+            r.pack(fill="x", pady=2)
+
+            tk.Label(
+                r,
+                text=f"Scene {scene} | Cut {cut} | Type {typ}",
+                width=35,
+                anchor="w"
+            ).pack(side="left")
+
+            # available values
+            c.execute("""
+                SELECT DISTINCT value
+                FROM chara_type_bak
+                WHERE target_scene=?
+                  AND target_cut=?
+                  AND target_type=?
+                ORDER BY value
+            """, (scene, cut, typ))
+
+            values = [str(v[0]) for v in c.fetchall()]
+
+            # safety
+            if str(current_value) not in values:
+                values.append(str(current_value))
+                values.sort(key=int)
+
+            value_var = tk.StringVar(value=str(current_value))
+
+            ttk.Combobox(
+                r,
+                textvariable=value_var,
+                values=values,
+                state="readonly",
+                width=10
+            ).pack(side="left", padx=5)
+
+            row_widgets.append((scene, cut, typ, value_var))
+
+        # ---------------- Save ----------------
+        def save_parameter():
+
+            for scene, cut, typ, value_var in row_widgets:
+
+                c.execute("""
+                    UPDATE chara_type
+                    SET value=?
+                    WHERE chara_id=?
+                      AND target_scene=?
+                      AND target_cut=?
+                      AND target_type=?
+                """, (
+                    int(value_var.get()),
+                    chara_id,
+                    scene,
+                    cut,
+                    typ
+                ))
+
+            conn.commit()
+            messagebox.showinfo("Done", "Parameters updated.")
+
+        tk.Button(win, text="Save", command=save_parameter).pack(pady=10)
+
+        win.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: (conn.close(), win.destroy())
+        )
 
     def open_personality_settings(self):
         messagebox.showwarning("Tazuna saying", 
@@ -2294,6 +2517,11 @@ class ModLoaderGUI:
             var = tk.StringVar(value="None")
             ttk.Combobox(row, textvariable=var, values=options, state="readonly", width=30).pack(side="left")
             swap_vars[cid] = var
+            tk.Button(
+                row,
+                text="Edit Parameter",
+                command=lambda cid=cid: self.edit_parameter_personality(cid)
+            ).pack(side="left", padx=5)
         # 1212    
         control_row = tk.Frame(win)
         control_row.pack(pady=5)
@@ -3193,7 +3421,12 @@ class ModLoaderGUI:
 
         # --- no config found ---
         else:
-            messagebox.showerror("Error", "No setting.json or setting.yml found.")
+            messagebox.showerror(
+                "Mod Settings Not Found",
+                "No setting.json or setting.yml found.\n\n"
+                "Are you trying to load an Asset Mod?\n"
+                "Use Import Asset Folder instead."
+            )
             self.reset_mod_info()
             return
 
@@ -3252,7 +3485,10 @@ class ModLoaderGUI:
             choice = messagebox.askyesnocancel(
                 "Encryption Check",
                 f"{region_warn}{folder_type} detected.\n\n"
-                "Are you loading unencrypted / legacy assets?"
+                "How was this mod created?\n\n"
+                "Yes → Regular mod (encrypt before loading)\n"
+                "No → Already-encrypted asset mod (load directly)\n\n"
+                "If you're not sure, choose ""Yes"". Most mods use this format."
             )
 
             if choice is None:
@@ -3268,9 +3504,11 @@ class ModLoaderGUI:
         # ---------------- NOT PLATFORM MOD ----------------
 
         choice = messagebox.askyesnocancel(
-            "Non-platform Mod",
-            "No platform folders detected.\n\n"
-            "Are you loading unencrypted / legacy assets?"
+            "No Platform Detected",
+            "How was this mod created?\n\n"
+            "Yes → Regular mod (encrypt before loading)\n"
+            "No → Already-encrypted asset mod (load directly)\n\n"
+            "If you're not sure, choose ""Yes"". Most mods use this format."
         )
 
         if choice is None:
