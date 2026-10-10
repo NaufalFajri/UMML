@@ -491,19 +491,30 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
 
     def make_cache_id(path):
         """
-        Fast fingerprint:
-        filesize + modified time + first 1MB hash
+        Fast fingerprint based on content and size (not mtime):
+        filesize + first 1MB hash + last 1MB hash
         """
         stat = os.stat(path)
-
         h = hashlib.sha1()
-
+        h.update(str(stat.st_size).encode())
         with open(path, "rb") as f:
-            h.update(f.read(1024 * 1024))  # first 1MB only
+            h.update(f.read(1024 * 1024))  # first 1MB
+            if stat.st_size > 1024 * 1024:
+                f.seek(max(0, stat.st_size - 1024 * 1024))
+                h.update(f.read(1024 * 1024))  # last 1MB
 
-        digest = h.hexdigest()[:12]
+        digest = h.hexdigest()[:16]
+        return f"{stat.st_size}_{digest}"
 
-        return f"{stat.st_size}_{int(stat.st_mtime)}_{digest}"
+    def cleanup_old_meta_caches(target_keep):
+        import glob
+        for f in glob.glob(os.path.join(base_path, "meta_decrypted_*.db*")):
+            if os.path.normcase(os.path.abspath(f)) != os.path.normcase(os.path.abspath(target_keep)):
+                try:
+                    os.remove(f)
+                    print(f"Removed stale meta cache: {os.path.basename(f)}")
+                except Exception:
+                    pass
 
     def is_valid_sqlite(path):
         if not os.path.isfile(path):
@@ -564,6 +575,12 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
     # ---------------- VALID CACHE ---------------- #
     if is_valid_sqlite(meta_dec):
         print("Using cached decrypted meta")
+        try:
+            with sqlite3.connect(meta_dec) as _idx_conn:
+                _idx_conn.execute("CREATE INDEX IF NOT EXISTS idx_a_h ON a(h)")
+        except Exception:
+            pass
+        cleanup_old_meta_caches(meta_dec)
         return meta_dec
 
     print("Decrypting meta database...")
@@ -589,6 +606,13 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
     if not is_valid_sqlite(meta_dec):
         raise RuntimeError("Decrypted meta validation failed")
 
+    try:
+        with sqlite3.connect(meta_dec) as _idx_conn:
+            _idx_conn.execute("CREATE INDEX IF NOT EXISTS idx_a_h ON a(h)")
+    except Exception:
+        pass
+
+    cleanup_old_meta_caches(meta_dec)
     return meta_dec
     
 class ModLoaderGUI:    
@@ -621,11 +645,28 @@ class ModLoaderGUI:
         self.load_hachimi_dict()
         self.create_widgets()
 
+    def warn_misc_unsupported(self, callback):
+        def wrapper(*args, **kwargs):
+            if messagebox.askokcancel(
+                "Warning: No Longer Supported",
+                "The Misc section is no longer supported and may be unstable.\n\n"
+                "Do you want to continue?"
+            ):
+                return callback(*args, **kwargs)
+        return wrapper
+
     def create_widgets(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
         misc_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Misc", menu=misc_menu)
+        menubar.add_cascade(label="Misc (Unsupported)", menu=misc_menu)
+
+        misc_menu.add_command(
+            label="⚠️ Misc is no longer supported & unstable",
+            state="disabled"
+        )
+        misc_menu.add_separator()
+
         character_menu = tk.Menu(misc_menu, tearoff=0)
         misc_menu.add_cascade(label="Character", menu=character_menu)
         asset_menu = tk.Menu(misc_menu, tearoff=0)
@@ -633,21 +674,21 @@ class ModLoaderGUI:
 
         asset_menu.add_command(
             label="Clean Up",
-            command=self.clean_unused_assets
+            command=self.warn_misc_unsupported(self.clean_unused_assets)
         )
         character_menu.add_command(
             label="Attribute",
-            command=self.open_chara_settings
+            command=self.warn_misc_unsupported(self.open_chara_settings)
         )
 
         character_menu.add_command(
             label="Personality",
-            command=self.open_personality_settings
+            command=self.warn_misc_unsupported(self.open_personality_settings)
         )
 
         character_menu.add_command(
             label="Dress",
-            command=self.open_dress_settings
+            command=self.warn_misc_unsupported(self.open_dress_settings)
         )
         
         single_mode_menu = tk.Menu(misc_menu, tearoff=0)
@@ -655,19 +696,19 @@ class ModLoaderGUI:
 
         single_mode_menu.add_command(
             label="Training",
-            command=self.open_training_settings
+            command=self.warn_misc_unsupported(self.open_training_settings)
         )
         dress_tweak_menu = tk.Menu(misc_menu, tearoff=0)
         misc_menu.add_cascade(label="Dress", menu=dress_tweak_menu)
 
         dress_tweak_menu.add_command(
             label="Swap Alt to Main",
-            command=self.swap_alt_to_main
+            command=self.warn_misc_unsupported(self.swap_alt_to_main)
         )
         
         dress_tweak_menu.add_command(
             label="Restore Alt",
-            command=self.restore_alt
+            command=self.warn_misc_unsupported(self.restore_alt)
         )
         
         modelreplace_menu = tk.Menu(misc_menu, tearoff=0)
@@ -675,7 +716,7 @@ class ModLoaderGUI:
 
         modelreplace_menu.add_command(
             label="Swap Character",
-            command=self.open_swap_character
+            command=self.warn_misc_unsupported(self.open_swap_character)
         )
 
         story_menu = tk.Menu(misc_menu, tearoff=0)
@@ -683,7 +724,7 @@ class ModLoaderGUI:
 
         story_menu.add_command(
             label="Concert",
-            command=self.open_story_concert
+            command=self.warn_misc_unsupported(self.open_story_concert)
         )
 
         mod_frame = tk.LabelFrame(self.root, text="Mod Loader")
@@ -3767,6 +3808,11 @@ class ModLoaderGUI:
                 if hashes:
                     try:
                         conn = sqlite3.connect(meta_path)
+                        try:
+                            conn.execute("CREATE INDEX IF NOT EXISTS idx_a_h ON a(h)")
+                            conn.commit()
+                        except Exception:
+                            pass
                         c = conn.cursor()
 
                         # SQLite has limit (~999), so chunk it
