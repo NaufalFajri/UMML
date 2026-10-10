@@ -506,16 +506,6 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
         digest = h.hexdigest()[:16]
         return f"{stat.st_size}_{digest}"
 
-    def cleanup_old_meta_caches(target_keep):
-        import glob
-        for f in glob.glob(os.path.join(base_path, "meta_decrypted_*.db*")):
-            if os.path.normcase(os.path.abspath(f)) != os.path.normcase(os.path.abspath(target_keep)):
-                try:
-                    os.remove(f)
-                    print(f"Removed stale meta cache: {os.path.basename(f)}")
-                except Exception:
-                    pass
-
     def is_valid_sqlite(path):
         if not os.path.isfile(path):
             return False
@@ -580,7 +570,6 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
                 _idx_conn.execute("CREATE INDEX IF NOT EXISTS idx_a_h ON a(h)")
         except Exception:
             pass
-        cleanup_old_meta_caches(meta_dec)
         return meta_dec
 
     print("Decrypting meta database...")
@@ -612,7 +601,6 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
     except Exception:
         pass
 
-    cleanup_old_meta_caches(meta_dec)
     return meta_dec
     
 class ModLoaderGUI:    
