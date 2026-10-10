@@ -716,8 +716,6 @@ class ModLoaderGUI:
         tk.Label(control_frame, text=f"Region : {self.region} |").pack(side="right")
         self.restore_btn = tk.Button(control_frame, text="Restore Assets", command=self.restore_original_assets)
         self.restore_btn.pack(side="left", padx=5)
-        self.delete_db_btn = tk.Button(control_frame, text="Delete Database", command=self.delete_master_db)
-        self.delete_db_btn.pack(side="left", padx=5)
         progress_frame = tk.LabelFrame(self.root, text="Progress")
         progress_frame.pack(fill="x", padx=10, pady=5)
         self.progress_label = tk.Label(progress_frame, text="Waiting")
@@ -980,8 +978,11 @@ class ModLoaderGUI:
                     key = derive_asset_key(enc_key)
                     if key:
                         klen = len(key)
-                        for i in range(256, len(data)):
-                            data[i] ^= key[i % klen]
+                        rem = len(data) - 256
+                        keystream = (key * ((rem // klen) + 1))[:rem]
+                        data_int = int.from_bytes(data[256:], "big")
+                        key_int = int.from_bytes(keystream, "big")
+                        data[256:] = (data_int ^ key_int).to_bytes(rem, "big")
 
                 with open(output_path, "wb") as f:
                     f.write(data)
@@ -3608,7 +3609,70 @@ class ModLoaderGUI:
         elif mode == "decrypt":
             asset_folder = os.path.join(path, ".assets_cache")
             try:
-                decoded_count, missing_meta = self.decrypt_assets_internal(path, asset_folder, use_hash=False, filter_path=filter_folder)
+                try:
+                    decoded_count, missing_meta = self.decrypt_assets_internal(path, asset_folder, use_hash=False, filter_path=filter_folder)
+                except Exception as e:
+                    messagebox.showerror(
+                        "Decrypt Error",
+                        "Failed to decrypt assets.\n"
+                        "This mod may be incompatible with the current game version or region.\n\n"
+                        f"{e}"
+                    )
+                    return
+
+                if not os.path.isdir(asset_folder) or not os.listdir(asset_folder):
+                    messagebox.showinfo("uhh", "there nothing inside.")
+                    return
+                    
+                # --- Step 2: load assets from decrypted cache ---
+                os.makedirs(self.backup_path, exist_ok=True)
+                assets = os.listdir(asset_folder)
+
+                self.progress_bar["maximum"] = len(assets)
+                self.progress_bar["value"] = 0
+
+                for i, asset in enumerate(assets, start=1):
+                    src = os.path.join(asset_folder, asset)
+                    dst = os.path.join(self.dat_path, asset[:2], asset)
+                    backup = os.path.join(self.backup_path, asset[:2], asset)
+
+                    if os.path.isfile(dst):
+                        if not os.path.isfile(backup):
+                            os.makedirs(os.path.dirname(backup), exist_ok=True)
+                            shutil.move(dst, backup)  # backup only once
+                        else:
+                            os.remove(dst)
+                    else:
+                        missing_meta += 1
+
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy(src, dst)
+                    self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
+                    self.progress_bar["value"] = i
+                    self.root.update_idletasks()
+
+                messagebox.showinfo(
+                    "Success",
+                    f"{decoded_count} assets loaded successfully.\n"
+                    f"{missing_meta} assets were not found in meta database."
+                )
+            finally:
+                # --- Step 3: cleanup ---
+                if os.path.exists(asset_folder):
+                    shutil.rmtree(asset_folder, ignore_errors=True)
+                self.progress_label.config(text="Waiting")
+            return
+
+    def load_assets(self):
+        folder = self.mod_path.get()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Error", "Please select a valid mod folder first.")
+            return
+        asset_folder_v = os.path.join(folder, "assets")
+        asset_folder = os.path.join(folder, "assets_cache")
+        try:
+            try:
+                decoded_count, missing_meta = self.decrypt_assets_internal(asset_folder_v, asset_folder, use_hash=False, filter_path=None)
             except Exception as e:
                 messagebox.showerror(
                     "Decrypt Error",
@@ -3618,16 +3682,11 @@ class ModLoaderGUI:
                 )
                 return
 
-            if not os.listdir(asset_folder):
+            if not os.path.isdir(asset_folder) or not os.listdir(asset_folder):
                 messagebox.showinfo("uhh", "there nothing inside.")
-                shutil.rmtree(asset_folder, ignore_errors=True)
                 return
                 
             # --- Step 2: load assets from decrypted cache ---
-            if not os.path.isdir(asset_folder):
-                messagebox.showerror("Error", f"Asset cache not found: {asset_folder}")
-                return
-
             os.makedirs(self.backup_path, exist_ok=True)
             assets = os.listdir(asset_folder)
 
@@ -3648,83 +3707,22 @@ class ModLoaderGUI:
                 else:
                     missing_meta += 1
 
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy(src, dst)
                 self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
                 self.progress_bar["value"] = i
                 self.root.update_idletasks()
 
-            # --- Step 3: cleanup ---
-            if os.path.exists(asset_folder):
-                shutil.rmtree(asset_folder, ignore_errors=True)
-            self.progress_label.config(text="Waiting")
             messagebox.showinfo(
                 "Success",
                 f"{decoded_count} assets loaded successfully.\n"
                 f"{missing_meta} assets were not found in meta database."
             )
-            return
-
-    def load_assets(self):
-        folder = self.mod_path.get()
-        if not folder or not os.path.isdir(folder):
-            messagebox.showerror("Error", "Please select a valid mod folder first.")
-            return
-        asset_folder_v = os.path.join(folder, "assets")
-        asset_folder = os.path.join(folder, "assets_cache")
-        try:
-            decoded_count, missing_meta = self.decrypt_assets_internal(asset_folder_v, asset_folder, use_hash=False, filter_path=None)
-        except Exception as e:
-            messagebox.showerror(
-                "Decrypt Error",
-                "Failed to decrypt assets.\n"
-                "This mod may be incompatible with the current game version or region.\n\n"
-                f"{e}"
-            )
-            return
-
-        if not os.listdir(asset_folder):
-            messagebox.showinfo("uhh", "there nothing inside.")
-            shutil.rmtree(asset_folder, ignore_errors=True)
-            return
-            
-        # --- Step 2: load assets from decrypted cache ---
-        if not os.path.isdir(asset_folder):
-            messagebox.showerror("Error", f"Asset cache not found: {asset_folder}")
-            return
-
-        os.makedirs(self.backup_path, exist_ok=True)
-        assets = os.listdir(asset_folder)
-
-        self.progress_bar["maximum"] = len(assets)
-        self.progress_bar["value"] = 0
-
-        for i, asset in enumerate(assets, start=1):
-            src = os.path.join(asset_folder, asset)
-            dst = os.path.join(self.dat_path, asset[:2], asset)
-            backup = os.path.join(self.backup_path, asset[:2], asset)
-
-            if os.path.isfile(dst):
-                if not os.path.isfile(backup):
-                    os.makedirs(os.path.dirname(backup), exist_ok=True)
-                    shutil.move(dst, backup)  # backup only once
-                else:
-                    os.remove(dst)
-            else:
-                missing_meta += 1
-            shutil.copy(src, dst)
-            self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
-
-        # --- Step 3: cleanup ---
-        if os.path.exists(asset_folder):
-            shutil.rmtree(asset_folder, ignore_errors=True)
-        self.progress_label.config(text="Waiting")
-        messagebox.showinfo(
-            "Success",
-            f"{decoded_count} assets loaded successfully.\n"
-            f"{missing_meta} assets were not found in meta database."
-        )
+        finally:
+            # --- Step 3: cleanup ---
+            if os.path.exists(asset_folder):
+                shutil.rmtree(asset_folder, ignore_errors=True)
+            self.progress_label.config(text="Waiting")
 
     def unload_assets(self):
         folder = self.mod_path.get()
@@ -3766,8 +3764,6 @@ class ModLoaderGUI:
         if os.path.isfile(meta_path):
             try:
                 hashes = [os.path.basename(f) for f in backup_files]
-                name_map = {}
-
                 if hashes:
                     try:
                         conn = sqlite3.connect(meta_path)
@@ -3788,7 +3784,6 @@ class ModLoaderGUI:
 
                     except Exception as e:
                         messagebox.showwarning("Meta DB", f"Failed batch lookup:\n{e}")
-                conn.close()
             except Exception as e:
                 messagebox.showwarning("Meta DB", f"Failed to read meta database:\n{e}")
 
@@ -3806,17 +3801,39 @@ class ModLoaderGUI:
         listbox = tk.Listbox(frame, selectmode="extended", yscrollcommand=scrollbar.set, width=100, height=20)
         entries = []
 
-        for f in backup_files:
-            h = os.path.basename(f)
-            if h in name_map:
-                display = name_map[h]
-            else:
-                display = f"[Unknown] {h}"
-            entries.append((f, display))
-        entries.sort(key=lambda x: x[1].lower())  # sort by friendly name
-        listbox.insert(tk.END, *[display_name for _, display_name in entries])
+        def refresh_entries():
+            nonlocal entries
+            entries = []
+            current_backups = []
+            for root_dir, dirs, files in os.walk(self.backup_path):
+                for file in files:
+                    rel_path = os.path.relpath(os.path.join(root_dir, file), self.backup_path)
+                    current_backups.append(rel_path)
+
+            for f in current_backups:
+                h = os.path.basename(f)
+                if h in name_map:
+                    display = name_map[h]
+                else:
+                    display = f"[Unknown] {h}"
+                entries.append((f, display))
+            entries.sort(key=lambda x: x[1].lower())  # sort by friendly name
+
+            listbox.delete(0, tk.END)
+            if entries:
+                listbox.insert(tk.END, *[display_name for _, display_name in entries])
+
+        refresh_entries()
         listbox.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=listbox.yview)
+
+        def cleanup_empty_backup_dirs(file_path):
+            parent = os.path.dirname(file_path)
+            if os.path.isdir(parent) and not os.listdir(parent):
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    pass
 
         def restore_selected():
             sel = listbox.curselection()
@@ -3837,9 +3854,12 @@ class ModLoaderGUI:
                 if os.path.exists(dat_file):
                     os.remove(dat_file)
                     shutil.move(backup_file, dat_file)
+                    cleanup_empty_backup_dirs(backup_file)
                     restored += 1
                 else:
                     cannot_restored += 1
+
+            refresh_entries()
             messagebox.showinfo(
                 "Done",
                 f"Restored {restored} selected file(s).\n"
@@ -3852,16 +3872,19 @@ class ModLoaderGUI:
 
             restored = 0
             cannot_restored = 0
-            for rel_path, _ in entries:
+            for rel_path, _ in list(entries):
                 backup_file = os.path.join(self.backup_path, rel_path)
                 dat_file = os.path.join(self.dat_path, rel_path)
                 os.makedirs(os.path.dirname(dat_file), exist_ok=True)
                 if os.path.exists(dat_file):
                     os.remove(dat_file)
                     shutil.move(backup_file, dat_file)
+                    cleanup_empty_backup_dirs(backup_file)
                     restored += 1
                 else:
                     cannot_restored += 1
+
+            refresh_entries()
             messagebox.showinfo(
                 "Done",
                 f"Restored {restored} file(s).\n"
@@ -3874,27 +3897,6 @@ class ModLoaderGUI:
         tk.Button(btn_frame, text="Restore All", command=restore_all).pack(side="left", padx=5)
 
 
-    def delete_master_db(self):
-        db_path = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
-        if not os.path.isfile(db_path):
-            messagebox.showinfo("Info", "master.mdb not found, nothing to delete.")
-            return
-
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            "This will delete master.mdb.\n\n"
-            "The game will download a fresh copy after login.\n\n"
-            "Are you sure you want to continue?"
-        ):
-            return
-
-        try:
-            os.remove(db_path)
-            messagebox.showinfo("Deleted", "master.mdb deleted successfully.\nRe-login to download a new database.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not delete database:\n{e}")
-
-        return exists
 
 if __name__ == "__main__":
     root = tk.Tk()
