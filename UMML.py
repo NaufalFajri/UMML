@@ -854,7 +854,7 @@ class ModLoaderGUI:
         return self.hachimi_dict.get(cat, {}).get(idx, default_text)
         
     # from kairusds/umamusu-utils
-    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False, filter_path=None):
+    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False, filter_path=None, direct_to_dat=False):
         AB_KEY = b'\x53\x2B\x46\x31\xE4\xA7\xB9\x47\x3E\x7C\xFB'
 
         def derive_asset_key(key_long):
@@ -879,145 +879,172 @@ class ModLoaderGUI:
             raise RuntimeError("Meta database not found")
 
         os.makedirs(dst_root, exist_ok=True)
+        if direct_to_dat:
+            os.makedirs(self.backup_path, exist_ok=True)
 
         conn = sqlite3.connect(meta_db)
-        c = conn.cursor()
-        
-        c.execute("PRAGMA table_info(a)")
-        columns = {row[1] for row in c.fetchall()}
-        has_encrypt = "e" in columns
-        
-        # DRIVE FROM MOD FILES
-        all_paths = list(self.scan_full_path(src_root))
-
-        # ---------------- FILTER ----------------
-        if filter_path:
-            filtered = []
-            for p in all_paths:
-                parts = p.replace("\\", "/").split("/")
-                if filter_path in parts:
-                    filtered.append(p)
-            all_paths = filtered
-            #print(f"filtered: {all_paths}")
+        try:
+            c = conn.cursor()
             
-        total = len(all_paths)
-        self.progress_bar["maximum"] = total
-        self.progress_bar["value"] = 0
+            c.execute("PRAGMA table_info(a)")
+            columns = {row[1] for row in c.fetchall()}
+            has_encrypt = "e" in columns
+            
+            # DRIVE FROM MOD FILES
+            all_paths = list(self.scan_full_path(src_root))
 
-        decoded_count = 0
-        missing_meta = 0
+            # ---------------- FILTER ----------------
+            if filter_path:
+                filtered = []
+                for p in all_paths:
+                    parts = p.replace("\\", "/").split("/")
+                    if filter_path in parts:
+                        filtered.append(p)
+                all_paths = filtered
+                #print(f"filtered: {all_paths}")
 
-        for i, rel_path in enumerate(all_paths, start=1):
-            input_path = os.path.join(src_root, rel_path)
-            self.progress_label.config(
-                text=f"Encrypting Asset {i} / {total}"
-            )
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
+            # ---------------- VALIDATE ASSET FILES UPFRONT ----------------
+            if not use_hash:
+                valid_paths = []
+                for p in all_paths:
+                    full_p = os.path.join(src_root, p)
+                    if p.lower().endswith((".acb", ".awb", ".usm")):
+                        valid_paths.append(p)
+                    else:
+                        try:
+                            with open(full_p, "rb") as f:
+                                if f.read(8).startswith(b"UnityFS"):
+                                    valid_paths.append(p)
+                        except Exception:
+                            pass
+                all_paths = valid_paths
+                
+            total = len(all_paths)
+            self.progress_bar["maximum"] = total
+            self.progress_bar["value"] = 0
 
-            if use_hash:
-                # input files are hashes
-                if has_encrypt:
-                    c.execute("SELECT e FROM a WHERE h=?", (rel_path,))
+            decoded_count = 0
+            missing_meta = 0
+
+            for i, rel_path in enumerate(all_paths, start=1):
+                input_path = os.path.join(src_root, rel_path)
+                self.progress_label.config(
+                    text=f"Loading Asset {i} / {total}" if direct_to_dat else f"Encrypting Asset {i} / {total}"
+                )
+                self.progress_bar["value"] = i
+                self.root.update_idletasks()
+
+                if use_hash:
+                    # input files are hashes
+                    if has_encrypt:
+                        c.execute("SELECT e FROM a WHERE h=?", (rel_path,))
+                        row = c.fetchone()
+                        if not row:
+                            missing_meta += 1
+                            continue
+                        enc_key = int(row[0])
+                    else:
+                        c.execute("SELECT 1 FROM a WHERE h=?", (rel_path,))
+                        row = c.fetchone()
+                        if not row:
+                            missing_meta += 1
+                            continue
+                        enc_key = 0
+
+                    hash_name = rel_path
+                else:
+                    # input files are meta paths
+                    if has_encrypt:
+                        c.execute("SELECT h, e FROM a WHERE n=?", (rel_path,))
+                    else:
+                        c.execute("SELECT h FROM a WHERE n=?", (rel_path,))
                     row = c.fetchone()
+                    # fallback unity & paired acb/awb
+                    if not row:
+                        #print(f"{rel_path} not found, looking up")
+                        if input_path.lower().endswith((".acb", ".awb")):
+                            parent_dir = os.path.dirname(input_path)
+                            fname = os.path.basename(input_path)
+                            stem, _ = os.path.splitext(fname)
+                            acb_pair = os.path.join(parent_dir, f"{stem}.acb")
+                            awb_pair = os.path.join(parent_dir, f"{stem}.awb")
+                            if os.path.isfile(acb_pair) and os.path.isfile(awb_pair):
+                                if has_encrypt:
+                                    c.execute("SELECT h, e FROM a WHERE n LIKE ?", (f"%/{fname}",))
+                                else:
+                                    c.execute("SELECT h FROM a WHERE n LIKE ?", (f"%/{fname}",))
+                                row = c.fetchone()
+                        else:
+                            try:
+                                with open(input_path, "rb") as f:
+                                    header = f.read(8)
+                                    if header.startswith(b"UnityFS"):
+                                        f.seek(0)
+                                        env = UnityPy.load(f)
+
+                                        for obj in env.objects:
+                                            if obj.type.name == "AssetBundle":
+                                                data = obj.read()
+                                                if data.m_Name:
+                                                    resolved_name = os.path.splitext(data.m_Name)[0]
+                                                    # retry lookup
+                                                    if has_encrypt:
+                                                        c.execute("SELECT h, e FROM a WHERE n=?", (resolved_name,))
+                                                    else:
+                                                        c.execute("SELECT h FROM a WHERE n=?", (resolved_name,))
+                                                    row = c.fetchone()
+                                                    if row:
+                                                        #print(f"{row} is found!, breaking")
+                                                        break
+                            except Exception:
+                                pass
+                    # FINAL CHECK
                     if not row:
                         missing_meta += 1
                         continue
-                    enc_key = int(row[0])
+
+                    if has_encrypt:
+                        hash_name, enc_key = row[0], int(row[1])
+                    else:
+                        hash_name = row[0]
+                        enc_key = 0
+
+                if direct_to_dat:
+                    output_path = os.path.join(dst_root, hash_name[:2], hash_name)
+                    backup = os.path.join(self.backup_path, hash_name[:2], hash_name)
+                    if os.path.isfile(output_path):
+                        if not os.path.isfile(backup):
+                            os.makedirs(os.path.dirname(backup), exist_ok=True)
+                            shutil.move(output_path, backup)  # backup only once
+                        else:
+                            os.remove(output_path)
                 else:
-                    c.execute("SELECT 1 FROM a WHERE h=?", (rel_path,))
-                    row = c.fetchone()
-                    if not row:
-                        missing_meta += 1
-                        continue
-                    enc_key = 0
+                    output_path = os.path.join(dst_root, hash_name)
 
-                hash_name = rel_path
-            else:
-                # input files are meta paths
-                if has_encrypt:
-                    c.execute("SELECT h, e FROM a WHERE n=?", (rel_path,))
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                # for audio / usm
+                if enc_key == 0:
+                    shutil.copy(input_path, output_path)
                 else:
-                    c.execute("SELECT h FROM a WHERE n=?", (rel_path,))
-                row = c.fetchone()
-                # fallback unity
-                if not row:
-                    #print(f"{rel_path} not found, looking up")
-                    try:
-                        with open(input_path, "rb") as f:
-                            header = f.read(8)
-                            if header.startswith(b"UnityFS"):
-                                f.seek(0)
-                                env = UnityPy.load(f)
+                    with open(input_path, "rb") as f:
+                        data = bytearray(f.read())
 
-                                for obj in env.objects:
-                                    if obj.type.name == "AssetBundle":
-                                        data = obj.read()
-                                        if data.m_Name:
-                                            resolved_name = os.path.splitext(data.m_Name)[0]
-                                            # retry lookup
-                                            if has_encrypt:
-                                                c.execute("SELECT h, e FROM a WHERE n=?", (resolved_name,))
-                                            else:
-                                                c.execute("SELECT h FROM a WHERE n=?", (resolved_name,))
-                                            row = c.fetchone()
-                                            if row:
-                                                #print(f"{row} is found!, breaking")
-                                                break
-                    except Exception:
-                        pass
-                # FINAL CHECK
-                if not row:
-                    should_count = False
+                    if len(data) > 256:
+                        key = derive_asset_key(enc_key)
+                        if key:
+                            klen = len(key)
+                            dlen = len(data)
+                            rem = dlen - 256
+                            keystream = (key * ((dlen // klen) + 1))[256:dlen]
+                            data_int = int.from_bytes(data[256:], "big")
+                            key_int = int.from_bytes(keystream, "big")
+                            data[256:] = (data_int ^ key_int).to_bytes(rem, "big")
 
-                    try:
-                        with open(input_path, "rb") as f:
-                            header = f.read(8)
-
-                        if (
-                            header.startswith(b"UnityFS")
-                            or input_path.lower().endswith((".acb", ".awb", ".usm"))
-                        ):
-                            should_count = True
-
-                    except Exception:
-                        pass
-
-                    if should_count:
-                        missing_meta += 1
-
-                    continue
-
-                if has_encrypt:
-                    hash_name, enc_key = row[0], int(row[1])
-                else:
-                    hash_name = row[0]
-                    enc_key = 0
-
-            output_path = os.path.join(dst_root, hash_name)
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            # for audio / usm
-            if enc_key == 0:
-                shutil.copy(input_path, output_path)
-            else:
-                with open(input_path, "rb") as f:
-                    data = bytearray(f.read())
-
-                if len(data) > 256:
-                    key = derive_asset_key(enc_key)
-                    if key:
-                        klen = len(key)
-                        rem = len(data) - 256
-                        keystream = (key * ((rem // klen) + 1))[:rem]
-                        data_int = int.from_bytes(data[256:], "big")
-                        key_int = int.from_bytes(keystream, "big")
-                        data[256:] = (data_int ^ key_int).to_bytes(rem, "big")
-
-                with open(output_path, "wb") as f:
-                    f.write(data)
-            decoded_count += 1
-
-        conn.close()
+                    with open(output_path, "wb") as f:
+                        f.write(data)
+                decoded_count += 1
+        finally:
+            conn.close()
         return decoded_count, missing_meta   
 
     def swap_character_attributes(self, src_cid, dst_cid):
@@ -3581,7 +3608,13 @@ class ModLoaderGUI:
                         filtered.append(p)
                 rel_paths = filtered
                 
-            assets = [os.path.join(path, p) for p in rel_paths]
+            assets = [
+                os.path.join(path, p)
+                for p in rel_paths
+                if "." not in os.path.basename(p)
+                and len(os.path.basename(p)) == 32
+                and os.path.basename(p).isalnum()
+            ]
 
             if not assets:
                 messagebox.showinfo("uhh", "there nothing inside.")
@@ -3597,10 +3630,6 @@ class ModLoaderGUI:
 
             for i, src in enumerate(assets, start=1):
                 filename = os.path.basename(src)
-
-                # optional filter
-                if len(filename) < 32:
-                    continue
 
                 dst = os.path.join(self.dat_path, filename[:2], filename)
                 backup = os.path.join(self.backup_path, filename[:2], filename)
@@ -3636,10 +3665,15 @@ class ModLoaderGUI:
             return
         # ---------------- LOAD ---------------- if is_mod_encrypted is false
         elif mode == "decrypt":
-            asset_folder = os.path.join(path, ".assets_cache")
             try:
                 try:
-                    decoded_count, missing_meta = self.decrypt_assets_internal(path, asset_folder, use_hash=False, filter_path=filter_folder)
+                    decoded_count, missing_meta = self.decrypt_assets_internal(
+                        path,
+                        self.dat_path,
+                        use_hash=False,
+                        filter_path=filter_folder,
+                        direct_to_dat=True
+                    )
                 except Exception as e:
                     messagebox.showerror(
                         "Decrypt Error",
@@ -3649,36 +3683,9 @@ class ModLoaderGUI:
                     )
                     return
 
-                if not os.path.isdir(asset_folder) or not os.listdir(asset_folder):
+                if decoded_count == 0 and missing_meta == 0:
                     messagebox.showinfo("uhh", "there nothing inside.")
                     return
-                    
-                # --- Step 2: load assets from decrypted cache ---
-                os.makedirs(self.backup_path, exist_ok=True)
-                assets = os.listdir(asset_folder)
-
-                self.progress_bar["maximum"] = len(assets)
-                self.progress_bar["value"] = 0
-
-                for i, asset in enumerate(assets, start=1):
-                    src = os.path.join(asset_folder, asset)
-                    dst = os.path.join(self.dat_path, asset[:2], asset)
-                    backup = os.path.join(self.backup_path, asset[:2], asset)
-
-                    if os.path.isfile(dst):
-                        if not os.path.isfile(backup):
-                            os.makedirs(os.path.dirname(backup), exist_ok=True)
-                            shutil.move(dst, backup)  # backup only once
-                        else:
-                            os.remove(dst)
-                    else:
-                        missing_meta += 1
-
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    shutil.copy(src, dst)
-                    self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
-                    self.progress_bar["value"] = i
-                    self.root.update_idletasks()
 
                 messagebox.showinfo(
                     "Success",
@@ -3686,9 +3693,6 @@ class ModLoaderGUI:
                     f"{missing_meta} assets were not found in meta database."
                 )
             finally:
-                # --- Step 3: cleanup ---
-                if os.path.exists(asset_folder):
-                    shutil.rmtree(asset_folder, ignore_errors=True)
                 self.progress_label.config(text="Waiting")
             return
 
@@ -3698,10 +3702,18 @@ class ModLoaderGUI:
             messagebox.showerror("Error", "Please select a valid mod folder first.")
             return
         asset_folder_v = os.path.join(folder, "assets")
-        asset_folder = os.path.join(folder, "assets_cache")
+        if not os.path.isdir(asset_folder_v):
+            messagebox.showinfo("uhh", "there nothing inside.")
+            return
         try:
             try:
-                decoded_count, missing_meta = self.decrypt_assets_internal(asset_folder_v, asset_folder, use_hash=False, filter_path=None)
+                decoded_count, missing_meta = self.decrypt_assets_internal(
+                    asset_folder_v,
+                    self.dat_path,
+                    use_hash=False,
+                    filter_path=None,
+                    direct_to_dat=True
+                )
             except Exception as e:
                 messagebox.showerror(
                     "Decrypt Error",
@@ -3711,36 +3723,9 @@ class ModLoaderGUI:
                 )
                 return
 
-            if not os.path.isdir(asset_folder) or not os.listdir(asset_folder):
+            if decoded_count == 0 and missing_meta == 0:
                 messagebox.showinfo("uhh", "there nothing inside.")
                 return
-                
-            # --- Step 2: load assets from decrypted cache ---
-            os.makedirs(self.backup_path, exist_ok=True)
-            assets = os.listdir(asset_folder)
-
-            self.progress_bar["maximum"] = len(assets)
-            self.progress_bar["value"] = 0
-
-            for i, asset in enumerate(assets, start=1):
-                src = os.path.join(asset_folder, asset)
-                dst = os.path.join(self.dat_path, asset[:2], asset)
-                backup = os.path.join(self.backup_path, asset[:2], asset)
-
-                if os.path.isfile(dst):
-                    if not os.path.isfile(backup):
-                        os.makedirs(os.path.dirname(backup), exist_ok=True)
-                        shutil.move(dst, backup)  # backup only once
-                    else:
-                        os.remove(dst)
-                else:
-                    missing_meta += 1
-
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy(src, dst)
-                self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
-                self.progress_bar["value"] = i
-                self.root.update_idletasks()
 
             messagebox.showinfo(
                 "Success",
@@ -3748,9 +3733,6 @@ class ModLoaderGUI:
                 f"{missing_meta} assets were not found in meta database."
             )
         finally:
-            # --- Step 3: cleanup ---
-            if os.path.exists(asset_folder):
-                shutil.rmtree(asset_folder, ignore_errors=True)
             self.progress_label.config(text="Waiting")
 
     def unload_assets(self):
