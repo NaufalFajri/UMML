@@ -12,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.5.2"
+modloader_version = "2.0.0"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
