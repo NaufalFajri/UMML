@@ -12,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "1.5.2"
+modloader_version = "2.0.0"
 required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
@@ -491,19 +491,20 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
 
     def make_cache_id(path):
         """
-        Fast fingerprint:
-        filesize + modified time + first 1MB hash
+        Fast fingerprint based on content and size (not mtime):
+        filesize + first 1MB hash + last 1MB hash
         """
         stat = os.stat(path)
-
         h = hashlib.sha1()
-
+        h.update(str(stat.st_size).encode())
         with open(path, "rb") as f:
-            h.update(f.read(1024 * 1024))  # first 1MB only
+            h.update(f.read(1024 * 1024))  # first 1MB
+            if stat.st_size > 1024 * 1024:
+                f.seek(max(0, stat.st_size - 1024 * 1024))
+                h.update(f.read(1024 * 1024))  # last 1MB
 
-        digest = h.hexdigest()[:12]
-
-        return f"{stat.st_size}_{int(stat.st_mtime)}_{digest}"
+        digest = h.hexdigest()[:16]
+        return f"{stat.st_size}_{digest}"
 
     def is_valid_sqlite(path):
         if not os.path.isfile(path):
@@ -564,6 +565,11 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
     # ---------------- VALID CACHE ---------------- #
     if is_valid_sqlite(meta_dec):
         print("Using cached decrypted meta")
+        try:
+            with sqlite3.connect(meta_dec) as _idx_conn:
+                _idx_conn.execute("CREATE INDEX IF NOT EXISTS idx_a_h ON a(h)")
+        except Exception:
+            pass
         return meta_dec
 
     print("Decrypting meta database...")
@@ -588,6 +594,12 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
 
     if not is_valid_sqlite(meta_dec):
         raise RuntimeError("Decrypted meta validation failed")
+
+    try:
+        with sqlite3.connect(meta_dec) as _idx_conn:
+            _idx_conn.execute("CREATE INDEX IF NOT EXISTS idx_a_h ON a(h)")
+    except Exception:
+        pass
 
     return meta_dec
     
@@ -621,11 +633,28 @@ class ModLoaderGUI:
         self.load_hachimi_dict()
         self.create_widgets()
 
+    def warn_misc_unsupported(self, callback):
+        def wrapper(*args, **kwargs):
+            if messagebox.askokcancel(
+                "Warning: No Longer Supported",
+                "The Misc section is no longer supported and may be unstable.\n\n"
+                "Do you want to continue?"
+            ):
+                return callback(*args, **kwargs)
+        return wrapper
+
     def create_widgets(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
         misc_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Misc", menu=misc_menu)
+        menubar.add_cascade(label="Misc (Unsupported)", menu=misc_menu)
+
+        misc_menu.add_command(
+            label="⚠️ Misc is no longer supported & unstable",
+            state="disabled"
+        )
+        misc_menu.add_separator()
+
         character_menu = tk.Menu(misc_menu, tearoff=0)
         misc_menu.add_cascade(label="Character", menu=character_menu)
         asset_menu = tk.Menu(misc_menu, tearoff=0)
@@ -633,21 +662,21 @@ class ModLoaderGUI:
 
         asset_menu.add_command(
             label="Clean Up",
-            command=self.clean_unused_assets
+            command=self.warn_misc_unsupported(self.clean_unused_assets)
         )
         character_menu.add_command(
             label="Attribute",
-            command=self.open_chara_settings
+            command=self.warn_misc_unsupported(self.open_chara_settings)
         )
 
         character_menu.add_command(
             label="Personality",
-            command=self.open_personality_settings
+            command=self.warn_misc_unsupported(self.open_personality_settings)
         )
 
         character_menu.add_command(
             label="Dress",
-            command=self.open_dress_settings
+            command=self.warn_misc_unsupported(self.open_dress_settings)
         )
         
         single_mode_menu = tk.Menu(misc_menu, tearoff=0)
@@ -655,19 +684,19 @@ class ModLoaderGUI:
 
         single_mode_menu.add_command(
             label="Training",
-            command=self.open_training_settings
+            command=self.warn_misc_unsupported(self.open_training_settings)
         )
         dress_tweak_menu = tk.Menu(misc_menu, tearoff=0)
         misc_menu.add_cascade(label="Dress", menu=dress_tweak_menu)
 
         dress_tweak_menu.add_command(
             label="Swap Alt to Main",
-            command=self.swap_alt_to_main
+            command=self.warn_misc_unsupported(self.swap_alt_to_main)
         )
         
         dress_tweak_menu.add_command(
             label="Restore Alt",
-            command=self.restore_alt
+            command=self.warn_misc_unsupported(self.restore_alt)
         )
         
         modelreplace_menu = tk.Menu(misc_menu, tearoff=0)
@@ -675,7 +704,7 @@ class ModLoaderGUI:
 
         modelreplace_menu.add_command(
             label="Swap Character",
-            command=self.open_swap_character
+            command=self.warn_misc_unsupported(self.open_swap_character)
         )
 
         story_menu = tk.Menu(misc_menu, tearoff=0)
@@ -683,7 +712,7 @@ class ModLoaderGUI:
 
         story_menu.add_command(
             label="Concert",
-            command=self.open_story_concert
+            command=self.warn_misc_unsupported(self.open_story_concert)
         )
 
         mod_frame = tk.LabelFrame(self.root, text="Mod Loader")
@@ -716,8 +745,6 @@ class ModLoaderGUI:
         tk.Label(control_frame, text=f"Region : {self.region} |").pack(side="right")
         self.restore_btn = tk.Button(control_frame, text="Restore Assets", command=self.restore_original_assets)
         self.restore_btn.pack(side="left", padx=5)
-        self.delete_db_btn = tk.Button(control_frame, text="Delete Database", command=self.delete_master_db)
-        self.delete_db_btn.pack(side="left", padx=5)
         progress_frame = tk.LabelFrame(self.root, text="Progress")
         progress_frame.pack(fill="x", padx=10, pady=5)
         self.progress_label = tk.Label(progress_frame, text="Waiting")
@@ -827,7 +854,7 @@ class ModLoaderGUI:
         return self.hachimi_dict.get(cat, {}).get(idx, default_text)
         
     # from kairusds/umamusu-utils
-    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False, filter_path=None):
+    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False, filter_path=None, direct_to_dat=False):
         AB_KEY = b'\x53\x2B\x46\x31\xE4\xA7\xB9\x47\x3E\x7C\xFB'
 
         def derive_asset_key(key_long):
@@ -852,142 +879,172 @@ class ModLoaderGUI:
             raise RuntimeError("Meta database not found")
 
         os.makedirs(dst_root, exist_ok=True)
+        if direct_to_dat:
+            os.makedirs(self.backup_path, exist_ok=True)
 
         conn = sqlite3.connect(meta_db)
-        c = conn.cursor()
-        
-        c.execute("PRAGMA table_info(a)")
-        columns = {row[1] for row in c.fetchall()}
-        has_encrypt = "e" in columns
-        
-        # DRIVE FROM MOD FILES
-        all_paths = list(self.scan_full_path(src_root))
-
-        # ---------------- FILTER ----------------
-        if filter_path:
-            filtered = []
-            for p in all_paths:
-                parts = p.replace("\\", "/").split("/")
-                if filter_path in parts:
-                    filtered.append(p)
-            all_paths = filtered
-            #print(f"filtered: {all_paths}")
+        try:
+            c = conn.cursor()
             
-        total = len(all_paths)
-        self.progress_bar["maximum"] = total
-        self.progress_bar["value"] = 0
+            c.execute("PRAGMA table_info(a)")
+            columns = {row[1] for row in c.fetchall()}
+            has_encrypt = "e" in columns
+            
+            # DRIVE FROM MOD FILES
+            all_paths = list(self.scan_full_path(src_root))
 
-        decoded_count = 0
-        missing_meta = 0
+            # ---------------- FILTER ----------------
+            if filter_path:
+                filtered = []
+                for p in all_paths:
+                    parts = p.replace("\\", "/").split("/")
+                    if filter_path in parts:
+                        filtered.append(p)
+                all_paths = filtered
+                #print(f"filtered: {all_paths}")
 
-        for i, rel_path in enumerate(all_paths, start=1):
-            input_path = os.path.join(src_root, rel_path)
-            self.progress_label.config(
-                text=f"Encrypting Asset {i} / {total}"
-            )
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
+            # ---------------- VALIDATE ASSET FILES UPFRONT ----------------
+            if not use_hash:
+                valid_paths = []
+                for p in all_paths:
+                    full_p = os.path.join(src_root, p)
+                    if p.lower().endswith((".acb", ".awb", ".usm")):
+                        valid_paths.append(p)
+                    else:
+                        try:
+                            with open(full_p, "rb") as f:
+                                if f.read(8).startswith(b"UnityFS"):
+                                    valid_paths.append(p)
+                        except Exception:
+                            pass
+                all_paths = valid_paths
+                
+            total = len(all_paths)
+            self.progress_bar["maximum"] = total
+            self.progress_bar["value"] = 0
 
-            if use_hash:
-                # input files are hashes
-                if has_encrypt:
-                    c.execute("SELECT e FROM a WHERE h=?", (rel_path,))
+            decoded_count = 0
+            missing_meta = 0
+
+            for i, rel_path in enumerate(all_paths, start=1):
+                input_path = os.path.join(src_root, rel_path)
+                self.progress_label.config(
+                    text=f"Loading Asset {i} / {total}" if direct_to_dat else f"Encrypting Asset {i} / {total}"
+                )
+                self.progress_bar["value"] = i
+                self.root.update_idletasks()
+
+                if use_hash:
+                    # input files are hashes
+                    if has_encrypt:
+                        c.execute("SELECT e FROM a WHERE h=?", (rel_path,))
+                        row = c.fetchone()
+                        if not row:
+                            missing_meta += 1
+                            continue
+                        enc_key = int(row[0])
+                    else:
+                        c.execute("SELECT 1 FROM a WHERE h=?", (rel_path,))
+                        row = c.fetchone()
+                        if not row:
+                            missing_meta += 1
+                            continue
+                        enc_key = 0
+
+                    hash_name = rel_path
+                else:
+                    # input files are meta paths
+                    if has_encrypt:
+                        c.execute("SELECT h, e FROM a WHERE n=?", (rel_path,))
+                    else:
+                        c.execute("SELECT h FROM a WHERE n=?", (rel_path,))
                     row = c.fetchone()
+                    # fallback unity & paired acb/awb
+                    if not row:
+                        #print(f"{rel_path} not found, looking up")
+                        if input_path.lower().endswith((".acb", ".awb")):
+                            parent_dir = os.path.dirname(input_path)
+                            fname = os.path.basename(input_path)
+                            stem, _ = os.path.splitext(fname)
+                            acb_pair = os.path.join(parent_dir, f"{stem}.acb")
+                            awb_pair = os.path.join(parent_dir, f"{stem}.awb")
+                            if os.path.isfile(acb_pair) and os.path.isfile(awb_pair):
+                                if has_encrypt:
+                                    c.execute("SELECT h, e FROM a WHERE n LIKE ?", (f"%/{fname}",))
+                                else:
+                                    c.execute("SELECT h FROM a WHERE n LIKE ?", (f"%/{fname}",))
+                                row = c.fetchone()
+                        else:
+                            try:
+                                with open(input_path, "rb") as f:
+                                    header = f.read(8)
+                                    if header.startswith(b"UnityFS"):
+                                        f.seek(0)
+                                        env = UnityPy.load(f)
+
+                                        for obj in env.objects:
+                                            if obj.type.name == "AssetBundle":
+                                                data = obj.read()
+                                                if data.m_Name:
+                                                    resolved_name = os.path.splitext(data.m_Name)[0]
+                                                    # retry lookup
+                                                    if has_encrypt:
+                                                        c.execute("SELECT h, e FROM a WHERE n=?", (resolved_name,))
+                                                    else:
+                                                        c.execute("SELECT h FROM a WHERE n=?", (resolved_name,))
+                                                    row = c.fetchone()
+                                                    if row:
+                                                        #print(f"{row} is found!, breaking")
+                                                        break
+                            except Exception:
+                                pass
+                    # FINAL CHECK
                     if not row:
                         missing_meta += 1
                         continue
-                    enc_key = int(row[0])
+
+                    if has_encrypt:
+                        hash_name, enc_key = row[0], int(row[1])
+                    else:
+                        hash_name = row[0]
+                        enc_key = 0
+
+                if direct_to_dat:
+                    output_path = os.path.join(dst_root, hash_name[:2], hash_name)
+                    backup = os.path.join(self.backup_path, hash_name[:2], hash_name)
+                    if os.path.isfile(output_path):
+                        if not os.path.isfile(backup):
+                            os.makedirs(os.path.dirname(backup), exist_ok=True)
+                            shutil.move(output_path, backup)  # backup only once
+                        else:
+                            os.remove(output_path)
                 else:
-                    c.execute("SELECT 1 FROM a WHERE h=?", (rel_path,))
-                    row = c.fetchone()
-                    if not row:
-                        missing_meta += 1
-                        continue
-                    enc_key = 0
+                    output_path = os.path.join(dst_root, hash_name)
 
-                hash_name = rel_path
-            else:
-                # input files are meta paths
-                if has_encrypt:
-                    c.execute("SELECT h, e FROM a WHERE n=?", (rel_path,))
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                # for audio / usm
+                if enc_key == 0:
+                    shutil.copy(input_path, output_path)
                 else:
-                    c.execute("SELECT h FROM a WHERE n=?", (rel_path,))
-                row = c.fetchone()
-                # fallback unity
-                if not row:
-                    #print(f"{rel_path} not found, looking up")
-                    try:
-                        with open(input_path, "rb") as f:
-                            header = f.read(8)
-                            if header.startswith(b"UnityFS"):
-                                f.seek(0)
-                                env = UnityPy.load(f)
+                    with open(input_path, "rb") as f:
+                        data = bytearray(f.read())
 
-                                for obj in env.objects:
-                                    if obj.type.name == "AssetBundle":
-                                        data = obj.read()
-                                        if data.m_Name:
-                                            resolved_name = os.path.splitext(data.m_Name)[0]
-                                            # retry lookup
-                                            if has_encrypt:
-                                                c.execute("SELECT h, e FROM a WHERE n=?", (resolved_name,))
-                                            else:
-                                                c.execute("SELECT h FROM a WHERE n=?", (resolved_name,))
-                                            row = c.fetchone()
-                                            if row:
-                                                #print(f"{row} is found!, breaking")
-                                                break
-                    except Exception:
-                        pass
-                # FINAL CHECK
-                if not row:
-                    should_count = False
+                    if len(data) > 256:
+                        key = derive_asset_key(enc_key)
+                        if key:
+                            klen = len(key)
+                            dlen = len(data)
+                            rem = dlen - 256
+                            keystream = (key * ((dlen // klen) + 1))[256:dlen]
+                            data_int = int.from_bytes(data[256:], "big")
+                            key_int = int.from_bytes(keystream, "big")
+                            data[256:] = (data_int ^ key_int).to_bytes(rem, "big")
 
-                    try:
-                        with open(input_path, "rb") as f:
-                            header = f.read(8)
-
-                        if (
-                            header.startswith(b"UnityFS")
-                            or input_path.lower().endswith((".acb", ".awb", ".usm"))
-                        ):
-                            should_count = True
-
-                    except Exception:
-                        pass
-
-                    if should_count:
-                        missing_meta += 1
-
-                    continue
-
-                if has_encrypt:
-                    hash_name, enc_key = row[0], int(row[1])
-                else:
-                    hash_name = row[0]
-                    enc_key = 0
-
-            output_path = os.path.join(dst_root, hash_name)
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            # for audio / usm
-            if enc_key == 0:
-                shutil.copy(input_path, output_path)
-            else:
-                with open(input_path, "rb") as f:
-                    data = bytearray(f.read())
-
-                if len(data) > 256:
-                    key = derive_asset_key(enc_key)
-                    if key:
-                        klen = len(key)
-                        for i in range(256, len(data)):
-                            data[i] ^= key[i % klen]
-
-                with open(output_path, "wb") as f:
-                    f.write(data)
-            decoded_count += 1
-
-        conn.close()
+                    with open(output_path, "wb") as f:
+                        f.write(data)
+                decoded_count += 1
+        finally:
+            conn.close()
         return decoded_count, missing_meta   
 
     def swap_character_attributes(self, src_cid, dst_cid):
@@ -3551,7 +3608,13 @@ class ModLoaderGUI:
                         filtered.append(p)
                 rel_paths = filtered
                 
-            assets = [os.path.join(path, p) for p in rel_paths]
+            assets = [
+                os.path.join(path, p)
+                for p in rel_paths
+                if "." not in os.path.basename(p)
+                and len(os.path.basename(p)) == 32
+                and os.path.basename(p).isalnum()
+            ]
 
             if not assets:
                 messagebox.showinfo("uhh", "there nothing inside.")
@@ -3567,10 +3630,6 @@ class ModLoaderGUI:
 
             for i, src in enumerate(assets, start=1):
                 filename = os.path.basename(src)
-
-                # optional filter
-                if len(filename) < 32:
-                    continue
 
                 dst = os.path.join(self.dat_path, filename[:2], filename)
                 backup = os.path.join(self.backup_path, filename[:2], filename)
@@ -3606,9 +3665,55 @@ class ModLoaderGUI:
             return
         # ---------------- LOAD ---------------- if is_mod_encrypted is false
         elif mode == "decrypt":
-            asset_folder = os.path.join(path, ".assets_cache")
             try:
-                decoded_count, missing_meta = self.decrypt_assets_internal(path, asset_folder, use_hash=False, filter_path=filter_folder)
+                try:
+                    decoded_count, missing_meta = self.decrypt_assets_internal(
+                        path,
+                        self.dat_path,
+                        use_hash=False,
+                        filter_path=filter_folder,
+                        direct_to_dat=True
+                    )
+                except Exception as e:
+                    messagebox.showerror(
+                        "Decrypt Error",
+                        "Failed to decrypt assets.\n"
+                        "This mod may be incompatible with the current game version or region.\n\n"
+                        f"{e}"
+                    )
+                    return
+
+                if decoded_count == 0 and missing_meta == 0:
+                    messagebox.showinfo("uhh", "there nothing inside.")
+                    return
+
+                messagebox.showinfo(
+                    "Success",
+                    f"{decoded_count} assets loaded successfully.\n"
+                    f"{missing_meta} assets were not found in meta database."
+                )
+            finally:
+                self.progress_label.config(text="Waiting")
+            return
+
+    def load_assets(self):
+        folder = self.mod_path.get()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Error", "Please select a valid mod folder first.")
+            return
+        asset_folder_v = os.path.join(folder, "assets")
+        if not os.path.isdir(asset_folder_v):
+            messagebox.showinfo("uhh", "there nothing inside.")
+            return
+        try:
+            try:
+                decoded_count, missing_meta = self.decrypt_assets_internal(
+                    asset_folder_v,
+                    self.dat_path,
+                    use_hash=False,
+                    filter_path=None,
+                    direct_to_dat=True
+                )
             except Exception as e:
                 messagebox.showerror(
                     "Decrypt Error",
@@ -3618,113 +3723,17 @@ class ModLoaderGUI:
                 )
                 return
 
-            if not os.listdir(asset_folder):
+            if decoded_count == 0 and missing_meta == 0:
                 messagebox.showinfo("uhh", "there nothing inside.")
-                shutil.rmtree(asset_folder, ignore_errors=True)
-                return
-                
-            # --- Step 2: load assets from decrypted cache ---
-            if not os.path.isdir(asset_folder):
-                messagebox.showerror("Error", f"Asset cache not found: {asset_folder}")
                 return
 
-            os.makedirs(self.backup_path, exist_ok=True)
-            assets = os.listdir(asset_folder)
-
-            self.progress_bar["maximum"] = len(assets)
-            self.progress_bar["value"] = 0
-
-            for i, asset in enumerate(assets, start=1):
-                src = os.path.join(asset_folder, asset)
-                dst = os.path.join(self.dat_path, asset[:2], asset)
-                backup = os.path.join(self.backup_path, asset[:2], asset)
-
-                if os.path.isfile(dst):
-                    if not os.path.isfile(backup):
-                        os.makedirs(os.path.dirname(backup), exist_ok=True)
-                        shutil.move(dst, backup)  # backup only once
-                    else:
-                        os.remove(dst)
-                else:
-                    missing_meta += 1
-
-                shutil.copy(src, dst)
-                self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
-                self.progress_bar["value"] = i
-                self.root.update_idletasks()
-
-            # --- Step 3: cleanup ---
-            if os.path.exists(asset_folder):
-                shutil.rmtree(asset_folder, ignore_errors=True)
-            self.progress_label.config(text="Waiting")
             messagebox.showinfo(
                 "Success",
                 f"{decoded_count} assets loaded successfully.\n"
                 f"{missing_meta} assets were not found in meta database."
             )
-            return
-
-    def load_assets(self):
-        folder = self.mod_path.get()
-        if not folder or not os.path.isdir(folder):
-            messagebox.showerror("Error", "Please select a valid mod folder first.")
-            return
-        asset_folder_v = os.path.join(folder, "assets")
-        asset_folder = os.path.join(folder, "assets_cache")
-        try:
-            decoded_count, missing_meta = self.decrypt_assets_internal(asset_folder_v, asset_folder, use_hash=False, filter_path=None)
-        except Exception as e:
-            messagebox.showerror(
-                "Decrypt Error",
-                "Failed to decrypt assets.\n"
-                "This mod may be incompatible with the current game version or region.\n\n"
-                f"{e}"
-            )
-            return
-
-        if not os.listdir(asset_folder):
-            messagebox.showinfo("uhh", "there nothing inside.")
-            shutil.rmtree(asset_folder, ignore_errors=True)
-            return
-            
-        # --- Step 2: load assets from decrypted cache ---
-        if not os.path.isdir(asset_folder):
-            messagebox.showerror("Error", f"Asset cache not found: {asset_folder}")
-            return
-
-        os.makedirs(self.backup_path, exist_ok=True)
-        assets = os.listdir(asset_folder)
-
-        self.progress_bar["maximum"] = len(assets)
-        self.progress_bar["value"] = 0
-
-        for i, asset in enumerate(assets, start=1):
-            src = os.path.join(asset_folder, asset)
-            dst = os.path.join(self.dat_path, asset[:2], asset)
-            backup = os.path.join(self.backup_path, asset[:2], asset)
-
-            if os.path.isfile(dst):
-                if not os.path.isfile(backup):
-                    os.makedirs(os.path.dirname(backup), exist_ok=True)
-                    shutil.move(dst, backup)  # backup only once
-                else:
-                    os.remove(dst)
-            else:
-                missing_meta += 1
-            shutil.copy(src, dst)
-            self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
-
-        # --- Step 3: cleanup ---
-        if os.path.exists(asset_folder):
-            shutil.rmtree(asset_folder, ignore_errors=True)
-        self.progress_label.config(text="Waiting")
-        messagebox.showinfo(
-            "Success",
-            f"{decoded_count} assets loaded successfully.\n"
-            f"{missing_meta} assets were not found in meta database."
-        )
+        finally:
+            self.progress_label.config(text="Waiting")
 
     def unload_assets(self):
         folder = self.mod_path.get()
@@ -3766,11 +3775,14 @@ class ModLoaderGUI:
         if os.path.isfile(meta_path):
             try:
                 hashes = [os.path.basename(f) for f in backup_files]
-                name_map = {}
-
                 if hashes:
                     try:
                         conn = sqlite3.connect(meta_path)
+                        try:
+                            conn.execute("CREATE INDEX IF NOT EXISTS idx_a_h ON a(h)")
+                            conn.commit()
+                        except Exception:
+                            pass
                         c = conn.cursor()
 
                         # SQLite has limit (~999), so chunk it
@@ -3788,7 +3800,6 @@ class ModLoaderGUI:
 
                     except Exception as e:
                         messagebox.showwarning("Meta DB", f"Failed batch lookup:\n{e}")
-                conn.close()
             except Exception as e:
                 messagebox.showwarning("Meta DB", f"Failed to read meta database:\n{e}")
 
@@ -3806,17 +3817,39 @@ class ModLoaderGUI:
         listbox = tk.Listbox(frame, selectmode="extended", yscrollcommand=scrollbar.set, width=100, height=20)
         entries = []
 
-        for f in backup_files:
-            h = os.path.basename(f)
-            if h in name_map:
-                display = name_map[h]
-            else:
-                display = f"[Unknown] {h}"
-            entries.append((f, display))
-        entries.sort(key=lambda x: x[1].lower())  # sort by friendly name
-        listbox.insert(tk.END, *[display_name for _, display_name in entries])
+        def refresh_entries():
+            nonlocal entries
+            entries = []
+            current_backups = []
+            for root_dir, dirs, files in os.walk(self.backup_path):
+                for file in files:
+                    rel_path = os.path.relpath(os.path.join(root_dir, file), self.backup_path)
+                    current_backups.append(rel_path)
+
+            for f in current_backups:
+                h = os.path.basename(f)
+                if h in name_map:
+                    display = name_map[h]
+                else:
+                    display = f"[Unknown] {h}"
+                entries.append((f, display))
+            entries.sort(key=lambda x: x[1].lower())  # sort by friendly name
+
+            listbox.delete(0, tk.END)
+            if entries:
+                listbox.insert(tk.END, *[display_name for _, display_name in entries])
+
+        refresh_entries()
         listbox.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=listbox.yview)
+
+        def cleanup_empty_backup_dirs(file_path):
+            parent = os.path.dirname(file_path)
+            if os.path.isdir(parent) and not os.listdir(parent):
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    pass
 
         def restore_selected():
             sel = listbox.curselection()
@@ -3837,9 +3870,12 @@ class ModLoaderGUI:
                 if os.path.exists(dat_file):
                     os.remove(dat_file)
                     shutil.move(backup_file, dat_file)
+                    cleanup_empty_backup_dirs(backup_file)
                     restored += 1
                 else:
                     cannot_restored += 1
+
+            refresh_entries()
             messagebox.showinfo(
                 "Done",
                 f"Restored {restored} selected file(s).\n"
@@ -3852,16 +3888,19 @@ class ModLoaderGUI:
 
             restored = 0
             cannot_restored = 0
-            for rel_path, _ in entries:
+            for rel_path, _ in list(entries):
                 backup_file = os.path.join(self.backup_path, rel_path)
                 dat_file = os.path.join(self.dat_path, rel_path)
                 os.makedirs(os.path.dirname(dat_file), exist_ok=True)
                 if os.path.exists(dat_file):
                     os.remove(dat_file)
                     shutil.move(backup_file, dat_file)
+                    cleanup_empty_backup_dirs(backup_file)
                     restored += 1
                 else:
                     cannot_restored += 1
+
+            refresh_entries()
             messagebox.showinfo(
                 "Done",
                 f"Restored {restored} file(s).\n"
@@ -3874,27 +3913,6 @@ class ModLoaderGUI:
         tk.Button(btn_frame, text="Restore All", command=restore_all).pack(side="left", padx=5)
 
 
-    def delete_master_db(self):
-        db_path = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
-        if not os.path.isfile(db_path):
-            messagebox.showinfo("Info", "master.mdb not found, nothing to delete.")
-            return
-
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            "This will delete master.mdb.\n\n"
-            "The game will download a fresh copy after login.\n\n"
-            "Are you sure you want to continue?"
-        ):
-            return
-
-        try:
-            os.remove(db_path)
-            messagebox.showinfo("Deleted", "master.mdb deleted successfully.\nRe-login to download a new database.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not delete database:\n{e}")
-
-        return exists
 
 if __name__ == "__main__":
     root = tk.Tk()
