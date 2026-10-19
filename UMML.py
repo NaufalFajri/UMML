@@ -171,34 +171,6 @@ def is_file_in_use(filepath):
     except Exception:
         return False
 
-def check_game_files_locked(meta_path, game_dir=None, dat_path=None):
-    """
-    Checks if 'meta' or 'master.mdb' is currently in use/locked by the game.
-    Returns (is_locked: bool, locked_file_name: str or None)
-    """
-    files_to_check = []
-    if meta_path and os.path.isfile(meta_path):
-        files_to_check.append(("meta", meta_path))
-
-    master_path = None
-    if dat_path:
-        cand = os.path.join(os.path.dirname(dat_path), "master", "master.mdb")
-        if os.path.isfile(cand):
-            master_path = cand
-    if not master_path and game_dir:
-        cand = os.path.join(game_dir, "master", "master.mdb")
-        if os.path.isfile(cand):
-            master_path = cand
-
-    if master_path:
-        files_to_check.append(("master.mdb", master_path))
-
-    for name, path in files_to_check:
-        if is_file_in_use(path):
-            return True, name
-
-    return False, None
-
 def find_dmm_umamusume():
     # 1. Check dmmgame.cnf
     appdata = os.environ.get("APPDATA", "")
@@ -929,6 +901,14 @@ class ModLoaderGUI:
 
     def warn_misc_unsupported(self, callback):
         def wrapper(*args, **kwargs):
+            master_db = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
+            if os.path.isfile(master_db) and is_file_in_use(master_db):
+                messagebox.showwarning(
+                    "master.mdb In Use",
+                    "'master.mdb' is currently in use by the game.\n\n"
+                    "Please return to the Title screen (or close the game), then try again."
+                )
+                return
             if messagebox.askokcancel(
                 "Warning: No Longer Supported",
                 "The Misc section is no longer supported and may be unstable.\n\n"
@@ -3893,15 +3873,6 @@ class ModLoaderGUI:
             return "direct", None
 
     def load_assets_manual(self):
-        locked, locked_file = check_game_files_locked(self.meta_path_pth, self.game_dir, self.dat_path)
-        if locked:
-            messagebox.showwarning(
-                "Game File In Use",
-                f"'{locked_file}' is currently in use by the game.\n\n"
-                "Please return to the Title screen or close the game, then try again."
-            )
-            return
-
         path = filedialog.askdirectory(title="Select Asset Folder")
         if not path:
             return
@@ -4027,15 +3998,6 @@ class ModLoaderGUI:
             messagebox.showerror("Error", "Please select a valid mod folder first.")
             return
 
-        locked, locked_file = check_game_files_locked(self.meta_path_pth, self.game_dir, self.dat_path)
-        if locked:
-            messagebox.showwarning(
-                "Game File In Use",
-                f"'{locked_file}' is currently in use by the game.\n\n"
-                "Please return to the Title screen or close the game, then try again."
-            )
-            return
-
         asset_folder_v = os.path.join(folder, "assets")
         if not os.path.isdir(asset_folder_v):
             messagebox.showinfo("uhh", "there nothing inside.")
@@ -4093,15 +4055,6 @@ class ModLoaderGUI:
         self.progress_label.config(text="Waiting")
 
     def restore_original_assets(self):
-        locked, locked_file = check_game_files_locked(self.meta_path_pth, self.game_dir, self.dat_path)
-        if locked:
-            messagebox.showwarning(
-                "Game File In Use",
-                f"'{locked_file}' is currently in use by the game.\n\n"
-                "Please return to the Title screen or close the game, then try again."
-            )
-            return
-
         # collect backup files
         backup_files = []
         for root_dir, dirs, files in os.walk(self.backup_path):
