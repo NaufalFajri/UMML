@@ -12,8 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "2.0.0"
-required_keys = ["mod_version", "title", "description", "modloader_version"]
+modloader_version = "2.0.2"
 
 # --- Check dependency ---
 def install_package(package):
@@ -50,59 +49,145 @@ except ImportError:
             "please try again."
         )
         sys.exit(0)
-print(f"UMML version: {modloader_version}\n")
-print("You are using an improved version of tumugu UMML v1.2.0.\n")
-print("[OK] UnityPy ready")
-print("[OK] vdf ready")
-print("[OK] apsw-sqlite3mc ready")
-print("[OK] pyyaml")
+print(f"UMML v{modloader_version} (Improved from Tumugu v1.2.0)")
+print("[OK] Dependencies verified: UnityPy, vdf, apsw-sqlite3mc, pyyaml\n")
 
 def resolve_case_sensitive_path(path_obj):
     """
     Try exact path first.
-    If missing, try common Umamusume casing variants.
+    If missing, try case-insensitive resolution across directory segments.
+    Returns None if path_obj is None, empty, or string "None".
     """
-    if path_obj and os.path.isdir(path_obj):
-        return str(path_obj)
+    if not path_obj:
+        return None
 
-    path_str = str(path_obj)
+    path_str = str(path_obj).strip().strip('"').strip("'")
+    if not path_str or path_str.lower() == "none":
+        return None
 
-    replacements = [
-        ("umamusume", "Umamusume"),
-        ("Umamusume", "umamusume"),
-        ("umamusume_Data", "Umamusume_Data"),
-        ("Umamusume_Data", "umamusume_Data"),
-    ]
+    if os.path.isdir(path_str) or os.path.isfile(path_str):
+        return path_str
 
-    for old, new in replacements:
-        alt = path_str.replace(old, new)
+    try:
+        p = Path(path_str)
+        parts = p.parts
+        if not parts:
+            return None
+        current = Path(parts[0])
+        if not current.exists():
+            return path_str
+        for part in parts[1:]:
+            direct = current / part
+            if direct.exists():
+                current = direct
+                continue
+            part_lower = part.lower()
+            found = False
+            try:
+                for entry in os.scandir(current):
+                    if entry.name.lower() == part_lower:
+                        current = current / entry.name
+                        found = True
+                        break
+            except Exception:
+                pass
+            if not found:
+                current = current / part
+        if current.exists():
+            print(f"Resolved case mismatch:\n{path_str}\n-> {current}")
+            return str(current)
+    except Exception:
+        pass
 
-        if alt != path_str and os.path.isdir(alt):
-            print(f"Resolved case mismatch:\n{path_str}\n-> {alt}")
-            return alt
+    return path_str
 
-    return str(path_obj)
+def is_game_running():
+    try:
+        import ctypes
+        from ctypes import wintypes
+        TH32CS_SNAPPROCESS = 0x00000002
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_char * 260)
+            ]
+        kernel32 = ctypes.windll.kernel32
+        h_snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if h_snap == -1:
+            return False
+        pe = PROCESSENTRY32()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        game_exes = {b"umamusume.exe", b"umamusumeprettyderby_jpn.exe", b"umamusumeprettyderby.exe", b"komoeumamusume.exe"}
+        found = False
+        if kernel32.Process32First(h_snap, ctypes.byref(pe)):
+            while True:
+                if pe.szExeFile.lower() in game_exes:
+                    found = True
+                    break
+                if not kernel32.Process32Next(h_snap, ctypes.byref(pe)):
+                    break
+        kernel32.CloseHandle(h_snap)
+        return found
+    except Exception:
+        return False
+
+def is_file_in_use(filepath):
+    """
+    Checks if a file is currently open/locked by another process using Windows CreateFileW with share_mode=0.
+    """
+    if not filepath or not os.path.isfile(filepath):
+        return False
+    try:
+        import ctypes
+        GENERIC_READ = 0x80000000
+        OPEN_EXISTING = 3
+        handle = ctypes.windll.kernel32.CreateFileW(
+            str(filepath),
+            GENERIC_READ,
+            0,
+            None,
+            OPEN_EXISTING,
+            0,
+            None
+        )
+        if handle == -1:
+            err = ctypes.GetLastError()
+            return err in (32, 33)
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return False
+    except Exception:
+        return False
 
 def find_dmm_umamusume():
-    try:
-        config_path = Path(os.environ.get("APPDATA", "")) / "dmmgameplayer5" / "dmmgame.cnf"
+    # 1. Check dmmgame.cnf
+    appdata = os.environ.get("APPDATA", "")
+    for folder in ["dmmgameplayer5", "dmmgameplayer"]:
+        config_path = Path(appdata) / folder / "dmmgame.cnf"
+        if config_path.is_file():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    game_data = json.load(f)
+                for game in game_data.get("contents", []):
+                    if game.get("productId") == "umamusume":
+                        path = game.get("detail", {}).get("path")
+                        if path and os.path.isdir(path):
+                            return path
+            except Exception as e:
+                print(f"DMM detection error: {e}")
 
-        if not config_path.is_file():
-            return None
-
-        with open(config_path, "r", encoding="utf-8") as f:
-            game_data = json.load(f)
-
-        for game in game_data.get("contents", []):
-            if game.get("productId") != "umamusume":
-                continue
-
-            path = game.get("detail", {}).get("path")
-            if path and os.path.isdir(path):
-                return path
-
-    except Exception as e:
-        print(f"DMM detection error: {e}")
+    # 2. Check common DMM directories
+    for drive in ["C:", "D:", "E:", "F:"]:
+        cand = os.path.join(drive, os.sep, "DMMGames", "umamusume")
+        if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "umamusume.exe")):
+            return cand
 
     return None
 
@@ -119,7 +204,10 @@ def get_steam_path():
     for key_path in possible_keys:
         try:
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
-            return winreg.QueryValueEx(key, "InstallPath")[0]
+            val, _ = winreg.QueryValueEx(key, "InstallPath")
+            winreg.CloseKey(key)
+            if val and os.path.isdir(val):
+                return val
         except FileNotFoundError:
             continue
 
@@ -132,21 +220,23 @@ def get_steam_path():
 
 def get_steam_libraries(steam_path):
     libraries = []
+    if steam_path and os.path.isdir(steam_path):
+        libraries.append(steam_path)
 
     vdf_path = os.path.join(steam_path, "steamapps", "libraryfolders.vdf")
-    if not os.path.exists(vdf_path):
-        return [steam_path]
-
-    with open(vdf_path, "r", encoding="utf-8") as f:
-        data = vdf.load(f)
-
-    folders = data.get("libraryfolders", {})
-
-    for key in folders:
-        if key.isdigit():
-            path = folders[key].get("path")
-            if path:
-                libraries.append(path)
+    if os.path.exists(vdf_path):
+        try:
+            with open(vdf_path, "r", encoding="utf-8") as f:
+                data = vdf.load(f)
+            folders = data.get("libraryfolders", {})
+            for key in folders:
+                entry = folders[key]
+                if isinstance(entry, dict):
+                    path = entry.get("path")
+                    if path and os.path.isdir(path) and path not in libraries:
+                        libraries.append(path)
+        except Exception as e:
+            print(f"Error reading libraryfolders.vdf: {e}")
 
     return libraries
 
@@ -156,20 +246,53 @@ def get_steam_libraries(steam_path):
 # ---------------------------
 
 def find_komoe_umamusume():
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\komoemumamusume"
-        )
+    possible_keys = [
+        (winreg.HKEY_CURRENT_USER, r"Software\komoemumamusume"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\komoemumamusume"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\komoemumamusume"),
+    ]
+    for root_key, sub_key in possible_keys:
+        try:
+            key = winreg.OpenKey(root_key, sub_key)
+            game_dir_komoe, _ = winreg.QueryValueEx(key, "GameInstallPath")
+            winreg.CloseKey(key)
+            if game_dir_komoe and os.path.isdir(game_dir_komoe):
+                return game_dir_komoe
+        except Exception:
+            pass
 
-        game_dir_komoe, _ = winreg.QueryValueEx(key, "GameInstallPath")
-        winreg.CloseKey(key)
+    for drive in ["C:", "D:", "E:", "F:"]:
+        cand = os.path.join(drive, os.sep, "komoemumamusume", "komoemumamusume Game")
+        if os.path.isdir(cand):
+            return cand
 
-        if os.path.isdir(game_dir_komoe):
-            return game_dir_komoe
+    return None
 
-    except Exception as e:
-        print(f"Komoe detection failed: {e}")
+def find_kakao_umamusume():
+    possible_keys = [
+        (winreg.HKEY_CURRENT_USER, r"Software\KakaoGames\Umamusume"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\KakaoGames\Umamusume"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\KakaoGames\Umamusume"),
+    ]
+    for root_key, sub_key in possible_keys:
+        try:
+            key = winreg.OpenKey(root_key, sub_key)
+            for val_name in ["InstallPath", "Path", "GamePath"]:
+                try:
+                    val, _ = winreg.QueryValueEx(key, val_name)
+                    if val and os.path.isdir(val):
+                        winreg.CloseKey(key)
+                        return val
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+
+    for drive in ["C:", "D:", "E:", "F:"]:
+        cand = os.path.join(drive, os.sep, "Kakao Games", "Umamusume")
+        if os.path.isdir(cand):
+            return cand
 
     return None
         
@@ -182,14 +305,18 @@ def find_game_path(app_id):
 
     for lib in libraries:
         manifest = os.path.join(lib, "steamapps", f"appmanifest_{app_id}.acf")
-
         if os.path.exists(manifest):
-            with open(manifest, "r", encoding="utf-8") as f:
-                data = vdf.load(f)
+            try:
+                with open(manifest, "r", encoding="utf-8") as f:
+                    data = vdf.load(f)
 
-            installdir = data.get("AppState", {}).get("installdir")
-            if installdir:
-                return os.path.join(lib, "steamapps", "common", installdir)
+                installdir = data.get("AppState", {}).get("installdir")
+                if installdir:
+                    full_path = os.path.join(lib, "steamapps", "common", installdir)
+                    if os.path.isdir(full_path):
+                        return full_path
+            except Exception:
+                pass
 
     return None
 
@@ -213,7 +340,7 @@ def normalize_path(path):
 
 def fallback_path(platform, base_path=None, game_dir=None):
     """
-    Load saved paths if auto-detection failed.
+    Load saved paths if auto-detection failed or meta is missing.
     """
 
     if not os.path.isfile(GAME_PATH_JSON):
@@ -226,13 +353,16 @@ def fallback_path(platform, base_path=None, game_dir=None):
         info = data.get(platform, {})
 
         # Persistent folder
-        if base_path is None or not os.path.isdir(base_path):
+        base_has_meta = os.path.isfile(os.path.join(base_path, "meta")) if (base_path and os.path.isdir(base_path)) else False
+        if not base_path or not os.path.isdir(base_path) or not base_has_meta:
             saved = normalize_path(info.get("Persistent_dir", ""))
             if saved and os.path.isdir(saved):
-                base_path = saved
+                saved_has_meta = os.path.isfile(os.path.join(saved, "meta"))
+                if not base_path or not os.path.isdir(base_path) or saved_has_meta:
+                    base_path = saved
 
         # Game folder
-        if game_dir is None or not os.path.isdir(game_dir):
+        if not game_dir or not os.path.isdir(game_dir):
             saved = normalize_path(info.get("Game_dir", ""))
             if saved and os.path.isdir(saved):
                 game_dir = saved
@@ -242,44 +372,188 @@ def fallback_path(platform, base_path=None, game_dir=None):
 
     return base_path, game_dir
     
-def load_settings():
+def save_default_platform(platform):
+    try:
+        data = {}
+        if os.path.isfile(GAME_PATH_JSON):
+            with open(GAME_PATH_JSON, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data["SelectedPlatform"] = platform
+        os.makedirs(os.path.dirname(GAME_PATH_JSON), exist_ok=True)
+        with open(GAME_PATH_JSON, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Failed to save default platform: {e}")
+
+def get_default_platform():
+    try:
+        if os.path.isfile(GAME_PATH_JSON):
+            with open(GAME_PATH_JSON, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("SelectedPlatform")
+    except Exception:
+        pass
+    return None
+
+def select_platform_dialog(parent_root, detected_platforms, all_platforms, default_platform=None):
+    selected_platform = [default_platform if default_platform in all_platforms else (detected_platforms[0] if detected_platforms else all_platforms[0])]
+    cancelled = [False]
+
+    dialog = tk.Toplevel(parent_root)
+    dialog.title("Select Game Platform")
+    dialog.resizable(False, False)
+    dialog.transient(parent_root)
+    dialog.grab_set()
+
+    w, h = 460, 360
+    ws = dialog.winfo_screenwidth()
+    hs = dialog.winfo_screenheight()
+    x = max(0, int((ws / 2) - (w / 2)))
+    y = max(0, int((hs / 2) - (h / 2)))
+    dialog.geometry(f"{w}x{h}+{x}+{y}")
+
+    header_frame = tk.Frame(dialog, padx=15, pady=10)
+    header_frame.pack(fill=tk.X)
+    tk.Label(
+        header_frame,
+        text="Umamusume Pretty Derby",
+        font=("Helvetica", 12, "bold")
+    ).pack(anchor="w")
+    tk.Label(
+        header_frame,
+        text="Select the game version you want to manage:",
+        fg="#555555"
+    ).pack(anchor="w")
+
+    body_frame = tk.LabelFrame(dialog, text=" Available Platforms ", padx=15, pady=10)
+    body_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+    var = tk.StringVar(value=selected_platform[0])
+
+    for plat in all_platforms:
+        is_detected = plat in detected_platforms
+        status_text = " [Detected]" if is_detected else ""
+        fg_color = "#007700" if is_detected else "#777777"
+
+        row_frame = tk.Frame(body_frame)
+        row_frame.pack(fill=tk.X, pady=3, anchor="w")
+
+        rb = tk.Radiobutton(
+            row_frame,
+            text=plat,
+            variable=var,
+            value=plat,
+            font=("Helvetica", 10, "bold" if is_detected else "normal")
+        )
+        rb.pack(side=tk.LEFT)
+
+        if status_text:
+            tk.Label(row_frame, text=status_text, fg=fg_color, font=("Helvetica", 8, "italic")).pack(side=tk.LEFT, padx=5)
+
+    remember_var = tk.BooleanVar(value=False)
+    remember_chk = tk.Checkbutton(
+        dialog,
+        text="Remember my choice (don't ask on startup)",
+        variable=remember_var
+    )
+    remember_chk.pack(anchor="w", padx=15, pady=5)
+
+    btn_frame = tk.Frame(dialog, padx=15, pady=10)
+    btn_frame.pack(fill=tk.X)
+
+    def on_confirm():
+        selected_platform[0] = var.get()
+        if remember_var.get():
+            save_default_platform(selected_platform[0])
+        dialog.destroy()
+
+    def on_cancel():
+        cancelled[0] = True
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    launch_btn = tk.Button(btn_frame, text="Launch", width=12, bg="#4CAF50", fg="white", font=("Helvetica", 9, "bold"), command=on_confirm)
+    launch_btn.pack(side=tk.RIGHT, padx=5)
+
+    cancel_btn = tk.Button(btn_frame, text="Exit", width=10, command=on_cancel)
+    cancel_btn.pack(side=tk.RIGHT)
+
+    parent_root.wait_window(dialog)
+
+    if cancelled[0]:
+        sys.exit(0)
+
+    return selected_platform[0]
+    
+def load_settings(parent_root=None, force_platform=None):
+    if parent_root is None:
+        temp_root = tk.Tk()
+        temp_root.withdraw()
+        parent_root = temp_root
+
+    ALL_PLATFORMS = ["Steam Global", "Steam Japan", "DMM", "Komoe", "Kakao"]
+
     steam_game_path_jpn = find_game_path(3564400)
     steam_game_path_en = find_game_path(3224770)
     dmm_game_path_jpn = find_dmm_umamusume()
     komoe_game_path = find_komoe_umamusume()
+    kakao_game_path = find_kakao_umamusume()
     
-    game_dir = None
-    base_path = None
-    meta_path_pth = None
-    region = None
-    platform = None
+    # --- Steam Global (New location vs Old LocalLow location) ---
     base_path_steam_en = None
-    # New location
+    new_persistent_en = None
     if steam_game_path_en:
-        persistent = (
-            Path(steam_game_path_en)
-            / "UmamusumePrettyDerby_Data"
-            / "Persistent"
-        )
+        std_p = Path(steam_game_path_en) / "UmamusumePrettyDerby_Data" / "Persistent"
+        if std_p.is_dir():
+            new_persistent_en = std_p
+        else:
+            try:
+                for entry in os.scandir(steam_game_path_en):
+                    if entry.is_dir() and entry.name.lower().endswith("_data"):
+                        sub_p = Path(entry.path) / "Persistent"
+                        if sub_p.is_dir():
+                            new_persistent_en = sub_p
+                            break
+            except Exception:
+                pass
+        if new_persistent_en is None:
+            new_persistent_en = Path(steam_game_path_en) / "UmamusumePrettyDerby_Data" / "Persistent"
 
-        if (persistent / "meta").is_file():
-            base_path_steam_en = persistent
+    old_persistent_en = None
+    locallow_root = Path.home() / "AppData" / "LocalLow" / "Cygames"
+    if locallow_root.is_dir():
+        for sub_name in ["UmamusumePrettyDerby", "umamusumeprettyderby", "umamusume", "Umamusume"]:
+            cand = locallow_root / sub_name
+            if (cand / "meta").is_file():
+                old_persistent_en = cand
+                break
+        if old_persistent_en is None:
+            cand = locallow_root / "UmamusumePrettyDerby"
+            if cand.is_dir():
+                old_persistent_en = cand
 
-    # Old location fallback
-    if base_path_steam_en is None:
-        locallow = (
-            Path.home()
-            / "AppData"
-            / "LocalLow"
-            / "Cygames"
-            / "umamusume"
-        )
+    new_has_meta = new_persistent_en is not None and (new_persistent_en / "meta").is_file()
+    old_has_meta = old_persistent_en is not None and (old_persistent_en / "meta").is_file()
 
-        if (locallow / "meta").is_file():
-            base_path_steam_en = locallow
+    if new_has_meta and old_has_meta:
+        try:
+            new_mtime = (new_persistent_en / "meta").stat().st_mtime
+            old_mtime = (old_persistent_en / "meta").stat().st_mtime
+            base_path_steam_en = new_persistent_en if new_mtime >= old_mtime else old_persistent_en
+        except Exception:
+            base_path_steam_en = new_persistent_en
+    elif new_has_meta:
+        base_path_steam_en = new_persistent_en
+    elif old_has_meta:
+        base_path_steam_en = old_persistent_en
+    elif new_persistent_en and new_persistent_en.is_dir():
+        base_path_steam_en = new_persistent_en
+    elif old_persistent_en and old_persistent_en.is_dir():
+        base_path_steam_en = old_persistent_en
+    else:
+        base_path_steam_en = new_persistent_en
 
-    print(f"Steam EN path: {base_path_steam_en}")
-    
     base_path_steam_jp = None
     if steam_game_path_jpn:
         base_path_steam_jp = (
@@ -288,7 +562,6 @@ def load_settings():
             / "Persistent"
         )
         
-    print(f"Steam JP path: {base_path_steam_jp}")
     base_path_dmm_jp = None
     if dmm_game_path_jpn:
         base_path_dmm_jp = (
@@ -297,8 +570,6 @@ def load_settings():
             / "Persistent"
         )
         
-    print(f"DMM Game path: {dmm_game_path_jpn}")
-    
     base_path_komoe_tw = None
     if komoe_game_path:
         base_path_komoe_tw = (
@@ -306,157 +577,126 @@ def load_settings():
             / "komoeumamusume_Data"
             / "Persistent"
         )
-        
-    print(f"Komoe Game path: {komoe_game_path}")
-    
-    root = tk.Tk()
-    root.withdraw()
 
-    choice = messagebox.askyesnocancel(
-        "Platform",
-        "Are you using the Steam version?"
-    )
+    base_path_kakao = None
+    if kakao_game_path:
+        for cand_name in ["umamusume_Data", "Umamusume_Data"]:
+            p = Path(kakao_game_path) / cand_name / "Persistent"
+            if p.is_dir():
+                base_path_kakao = p
+                break
+        if base_path_kakao is None:
+            base_path_kakao = Path(kakao_game_path) / "umamusume_Data" / "Persistent"
 
-    if choice is None:
-        root.destroy()
-        sys.exit(0)
+    # Identify detected platforms
+    detected_platforms = []
+    if (steam_game_path_en and os.path.isdir(steam_game_path_en)) or (base_path_steam_en and os.path.isfile(os.path.join(base_path_steam_en, "meta"))):
+        detected_platforms.append("Steam Global")
+    if (steam_game_path_jpn and os.path.isdir(steam_game_path_jpn)) or (base_path_steam_jp and os.path.isfile(os.path.join(base_path_steam_jp, "meta"))):
+        detected_platforms.append("Steam Japan")
+    if (dmm_game_path_jpn and os.path.isdir(dmm_game_path_jpn)) or (base_path_dmm_jp and os.path.isfile(os.path.join(base_path_dmm_jp, "meta"))):
+        detected_platforms.append("DMM")
+    if (komoe_game_path and os.path.isdir(komoe_game_path)) or (base_path_komoe_tw and os.path.isfile(os.path.join(base_path_komoe_tw, "meta"))):
+        detected_platforms.append("Komoe")
+    if (kakao_game_path and os.path.isdir(kakao_game_path)) or (base_path_kakao and os.path.isfile(os.path.join(base_path_kakao, "meta"))):
+        detected_platforms.append("Kakao")
 
-    if choice:
-        steam_region = messagebox.askyesnocancel(
-            "Steam Region",
-            "Select Steam version:\n\n"
-            "Yes → Global\n"
-            "No  → Japan\n"
-            "Cancel → Exit"
-        )
-
-        if steam_region is None:
-            root.destroy()
-            sys.exit(0)
-
-        if steam_region:
-            platform = "Steam Global"
-        else:
-            platform = "Steam Japan"
-
+    if force_platform and force_platform in ALL_PLATFORMS:
+        platform = force_platform
     else:
-        dmm = messagebox.askyesnocancel(
-            "Platform",
-            "Are you using the DMM version?"
-        )
-
-        if dmm is None:
-            root.destroy()
-            sys.exit(0)
-
-        if dmm:
-            platform = "DMM"
-
+        saved_plat = get_default_platform()
+        if saved_plat in ALL_PLATFORMS:
+            platform = saved_plat
+            print(f"[Platform] Using saved platform: {platform}")
+        elif len(detected_platforms) == 1:
+            platform = detected_platforms[0]
+            print(f"[Platform] Only 1 game platform detected ({platform}). Auto-selected.")
         else:
-            asia = messagebox.askyesnocancel(
-                "Platform",
-                "Select version:\n\n"
-                "Yes → Kakao\n"
-                "No  → Komoe\n"
-                "Cancel → Exit"
+            platform = select_platform_dialog(
+                parent_root,
+                detected_platforms=detected_platforms,
+                all_platforms=ALL_PLATFORMS,
+                default_platform=detected_platforms[0] if detected_platforms else "Steam Japan"
             )
 
-            if asia is None:
-                root.destroy()
-                sys.exit(0)
-
-            if asia:
-                platform = "Kakao"
-            else:
-                platform = "Komoe"
-    root.destroy()
-    
+    # Resolve selected platform paths
     if platform == "Steam Global":
         base_path = resolve_case_sensitive_path(base_path_steam_en)
         game_dir = resolve_case_sensitive_path(steam_game_path_en)
-        
-        base_path, game_dir = fallback_path(
-            platform,
-            base_path,
-            game_dir
-        )
-        
-        meta_path_pth = os.path.join(base_path, "meta")
+        base_path, game_dir = fallback_path(platform, base_path, game_dir)
+        meta_path_pth = os.path.join(base_path, "meta") if base_path else None
         region = "Global"
 
     elif platform == "Steam Japan":
         base_path = resolve_case_sensitive_path(base_path_steam_jp)
         game_dir = resolve_case_sensitive_path(steam_game_path_jpn)
-        
-        base_path, game_dir = fallback_path(
-            platform,
-            base_path,
-            game_dir
-        )
-        
-        meta_path_pth = os.path.join(base_path, "meta")
+        base_path, game_dir = fallback_path(platform, base_path, game_dir)
+        meta_path_pth = os.path.join(base_path, "meta") if base_path else None
         region = "Japan"
 
     elif platform == "DMM":
         base_path = resolve_case_sensitive_path(base_path_dmm_jp)
         game_dir = resolve_case_sensitive_path(dmm_game_path_jpn)
-        
-        base_path, game_dir = fallback_path(
-            platform,
-            base_path,
-            game_dir
-        )
-        
-        meta_path_pth = os.path.join(base_path, "meta")
+        base_path, game_dir = fallback_path(platform, base_path, game_dir)
+        meta_path_pth = os.path.join(base_path, "meta") if base_path else None
         region = "Japan"
 
     elif platform == "Kakao":
-        # TODO implement
-        #base_path = resolve_case_sensitive_path(base_path_dmm_jp)
-        #game_dir = Path(komoe_game_path) / "komoemumamusume Game"
-        
-        base_path, game_dir = fallback_path(
-            platform,
-            base_path,
-            game_dir
-        )
-        
-        meta_path_pth = os.path.join(game_dir, "meta")
+        base_path = resolve_case_sensitive_path(base_path_kakao)
+        game_dir = resolve_case_sensitive_path(kakao_game_path)
+        base_path, game_dir = fallback_path(platform, base_path, game_dir)
+        if base_path and os.path.isfile(os.path.join(base_path, "meta")):
+            meta_path_pth = os.path.join(base_path, "meta")
+        elif game_dir and os.path.isfile(os.path.join(game_dir, "meta")):
+            meta_path_pth = os.path.join(game_dir, "meta")
+        else:
+            meta_path_pth = os.path.join(base_path, "meta") if base_path else None
         region = "Korea"
 
     elif platform == "Komoe":
         base_path = resolve_case_sensitive_path(base_path_komoe_tw)
         game_dir = resolve_case_sensitive_path(komoe_game_path)
-        meta_path_pth = os.path.join(game_dir, "meta")
-        region = "Taiwan"     
-        
-    # --------------------
+        base_path, game_dir = fallback_path(platform, base_path, game_dir)
+        if base_path and os.path.isfile(os.path.join(base_path, "meta")):
+            meta_path_pth = os.path.join(base_path, "meta")
+        elif game_dir and os.path.isfile(os.path.join(game_dir, "meta")):
+            meta_path_pth = os.path.join(game_dir, "meta")
+        else:
+            meta_path_pth = os.path.join(game_dir, "meta") if game_dir else None
+        region = "Taiwan"
+    else:
+        raise ValueError(f"Unknown platform: {platform}")
+
     # Validate
-    # --------------------
     if not base_path or not os.path.isdir(base_path):
         messagebox.showerror(
             "Game Not Found",
-            f"Selected {region} version was not found.\n\n"
+            f"Selected {platform} ({region}) version was not found.\n\n"
             "Please make sure the game is installed and run at least once.\n"
-            "If detection still fails, open Command Prompt as administrator"
-            " and run this .py file again."
+            "If detection still fails, set the correct path in UMML_Data/GamePath.json."
         )
         sys.exit(1)
+
     if meta_path_pth is None or not os.path.isfile(meta_path_pth):
         messagebox.showerror(
             "Meta Not Found",
-            f"Meta database not found:\n{meta_path_pth}"
+            f"Meta database not found:\n{meta_path_pth}\n\n"
+            "Please make sure the game has finished downloading its initial data,\n"
+            "or set the correct Persistent_dir in UMML_Data/GamePath.json."
         )
         sys.exit(1)
-    if region == "Taiwan":
+
+    if region in ("Taiwan", "Korea") and not (base_path and os.path.isdir(os.path.join(base_path, "dat"))):
         dat = os.path.join(game_dir, "dat")
         backup = os.path.join(game_dir, "dat.backup")
     else:
         dat = os.path.join(base_path, "dat")
         backup = os.path.join(base_path, "dat.backup")
-        
+
+    print(f"[Platform] Active: {platform} | Region: {region}")
     print(f"Game Directory path: {game_dir}")
-    return dat, backup, region, game_dir, meta_path_pth
+    print(f"Base Directory path: {base_path}")
+    return dat, backup, region, game_dir, meta_path_pth, platform
     
 # using ref from noccu/hachimi-tools
 def load_or_decrypt_meta_simple(dat_path, meta_path, region):
@@ -606,7 +846,6 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
 class ModLoaderGUI:    
     def load_hachimi_dict(self):
         path = os.path.join(self.game_dir, "hachimi", "localized_data", "text_data_dict.json")
-        #print(f"{path}")
         if not os.path.isfile(path):
             self.hachimi_dict = {}
             return
@@ -619,22 +858,50 @@ class ModLoaderGUI:
             
     def __init__(self, root):
         self.root = root
-        self.root.title("UMML GUI")
 
-        self.dat_path, self.backup_path, self.region, self.game_dir, self.meta_path_pth = load_settings()
+        self.dat_path, self.backup_path, self.region, self.game_dir, self.meta_path_pth, self.platform = load_settings(parent_root=self.root)
+        self.root.title(f"UMML GUI - {self.platform}")
+
         # bind function (optional but matches your request)
         self.meta_path_load = load_or_decrypt_meta_simple
         # resolve meta path ONCE at startup
-        self.meta_path = self.meta_path_load(self.dat_path, self.meta_path_pth, self.region)   
-        #print(f"[Meta] Using meta DB: {self.meta_path}")
+        self.meta_path = self.meta_path_load(self.dat_path, self.meta_path_pth, self.region)
         self.mod_path = tk.StringVar()
         self.title_text = tk.StringVar()
         self.version_text = tk.StringVar()
         self.load_hachimi_dict()
         self.create_widgets()
 
+    def switch_game_platform(self):
+        ALL_PLATFORMS = ["Steam Global", "Steam Japan", "DMM", "Komoe", "Kakao"]
+        new_plat = select_platform_dialog(
+            self.root,
+            detected_platforms=[],
+            all_platforms=ALL_PLATFORMS,
+            default_platform=self.platform
+        )
+        if new_plat and new_plat != self.platform:
+            try:
+                self.dat_path, self.backup_path, self.region, self.game_dir, self.meta_path_pth, self.platform = load_settings(
+                    parent_root=self.root, force_platform=new_plat
+                )
+                self.meta_path = self.meta_path_load(self.dat_path, self.meta_path_pth, self.region)
+                self.root.title(f"UMML GUI - {self.platform}")
+                self.create_widgets()
+                messagebox.showinfo("Platform Changed", f"Successfully switched to {self.platform} ({self.region}).")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to switch platform:\n{e}")
+
     def warn_misc_unsupported(self, callback):
         def wrapper(*args, **kwargs):
+            master_db = os.path.join(os.path.dirname(self.dat_path), "master", "master.mdb")
+            if os.path.isfile(master_db) and is_file_in_use(master_db):
+                messagebox.showwarning(
+                    "master.mdb In Use",
+                    "'master.mdb' is currently in use by the game.\n\n"
+                    "Please return to the Title screen (or close the game), then try again."
+                )
+                return
             if messagebox.askokcancel(
                 "Warning: No Longer Supported",
                 "The Misc section is no longer supported and may be unstable.\n\n"
@@ -646,6 +913,20 @@ class ModLoaderGUI:
     def create_widgets(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
+
+        # Platform menu
+        platform_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label=f"Platform ({self.region})", menu=platform_menu)
+        platform_menu.add_command(
+            label=f"Active: {self.platform}",
+            state="disabled"
+        )
+        platform_menu.add_separator()
+        platform_menu.add_command(
+            label="Switch Game Platform...",
+            command=self.switch_game_platform
+        )
+
         misc_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Misc (Unsupported)", menu=misc_menu)
 
@@ -657,13 +938,7 @@ class ModLoaderGUI:
 
         character_menu = tk.Menu(misc_menu, tearoff=0)
         misc_menu.add_cascade(label="Character", menu=character_menu)
-        asset_menu = tk.Menu(misc_menu, tearoff=0)
-        misc_menu.add_cascade(label="Asset", menu=asset_menu)
 
-        asset_menu.add_command(
-            label="Clean Up",
-            command=self.warn_misc_unsupported(self.clean_unused_assets)
-        )
         character_menu.add_command(
             label="Attribute",
             command=self.warn_misc_unsupported(self.open_chara_settings)
@@ -739,12 +1014,12 @@ class ModLoaderGUI:
         self.assets_load_btn.pack(side="left", padx=5)
         self.assets_load_raw_btn = tk.Button(control_frame, text="Import Asset Folder", command=self.load_assets_manual)
         self.assets_load_raw_btn.pack(side="left", padx=5)
-        #self.assets_unload_btn = tk.Button(control_frame, text="Unload Assets", state="disabled", command=self.unload_assets)
-        #self.assets_unload_btn.pack(side="left", padx=5)
-        tk.Label(control_frame, text=f"Version : {modloader_version}").pack(side="right")
-        tk.Label(control_frame, text=f"Region : {self.region} |").pack(side="right")
         self.restore_btn = tk.Button(control_frame, text="Restore Assets", command=self.restore_original_assets)
         self.restore_btn.pack(side="left", padx=5)
+        self.clean_btn = tk.Button(control_frame, text="Clean Up Assets", command=self.clean_unused_assets)
+        self.clean_btn.pack(side="left", padx=5)
+        tk.Label(control_frame, text=f"Version : {modloader_version}").pack(side="right")
+        tk.Label(control_frame, text=f"Region : {self.region} |").pack(side="right")
         progress_frame = tk.LabelFrame(self.root, text="Progress")
         progress_frame.pack(fill="x", padx=10, pady=5)
         self.progress_label = tk.Label(progress_frame, text="Waiting")
@@ -757,79 +1032,123 @@ class ModLoaderGUI:
             messagebox.showerror("Error", "Game data folder not found.")
             return
 
+        if not hasattr(self, "meta_path") or not os.path.isfile(self.meta_path):
+            messagebox.showerror("Error", "Meta database file not found.")
+            return
+
+        self.clean_btn.config(state="disabled")
         self.progress_label.config(text="Scanning assets...")
         self.root.update_idletasks()
 
-        # Scan every file in dat
-        dat_assets = {
-            p.replace("\\", "/")
-            for p in self.scan_full_path(self.dat_path)
-        }
-
-        # Read every valid hash from meta
-        valid_assets = set()
+        def format_size(bytes_size):
+            size = float(bytes_size)
+            for unit in ["B", "KB", "MB", "GB", "TB"]:
+                if size < 1024.0:
+                    return f"{size:.1f} {unit}"
+                size /= 1024.0
+            return f"{size:.1f} PB"
 
         try:
-            conn = sqlite3.connect(self.meta_path)
-            c = conn.cursor()
-
-            c.execute("SELECT h FROM a")
-            for (h,) in c.fetchall():
-                valid_assets.add(f"{h[:2]}/{h}")
-
-            conn.close()
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read meta database.\n\n{e}")
-            return
-
-        # Files not referenced by meta
-        orphan_assets = sorted(dat_assets - valid_assets)
-
-        self.progress_label.config(text="Waiting")
-
-        if not orphan_assets:
-            messagebox.showinfo(
-                "Clean Up",
-                "No unused assets were found."
-            )
-            return
-
-        if not messagebox.askyesno(
-            "Clean Up",
-            f"Found {len(orphan_assets)} unused asset(s).\n\n"
-            "These files are not referenced by the current meta database.\n"
-            "They are usually leftovers from old game updates or removed mods.\n\n"
-            "Delete them?"
-        ):
-            return
-
-        self.progress_bar["maximum"] = len(orphan_assets)
-        self.progress_bar["value"] = 0
-
-        deleted = 0
-        failed = 0
-
-        for i, rel_path in enumerate(orphan_assets, start=1):
+            # 1. Read every valid hash from meta
+            valid_assets = set()
             try:
-                os.remove(os.path.join(self.dat_path, rel_path))
-                deleted += 1
-            except Exception:
-                failed += 1
+                conn = sqlite3.connect(self.meta_path)
+                c = conn.cursor()
+                c.execute("SELECT h FROM a")
+                for (h,) in c.fetchall():
+                    if h:
+                        valid_assets.add(f"{h[:2]}/{h}")
+                conn.close()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read meta database.\n\n{e}")
+                return
 
-            self.progress_label.config(
-                text=f"Deleting {i} / {len(orphan_assets)}"
+            # Safety Guard: game normally has tens of thousands of assets
+            if len(valid_assets) < 500:
+                messagebox.showerror(
+                    "Safety Abort",
+                    "Meta database returned insufficient valid assets.\n"
+                    "Clean up was aborted to protect your game installation from data loss."
+                )
+                return
+
+            # 2. Scan every file in dat (only match valid 'xx/hash' structure)
+            dat_assets = set()
+            for p in self.scan_full_path(self.dat_path):
+                norm_p = p.replace("\\", "/")
+                parts = norm_p.split("/")
+                if len(parts) == 2 and len(parts[0]) == 2:
+                    dat_assets.add(norm_p)
+
+            # 3. Find orphan assets
+            orphan_assets = sorted(dat_assets - valid_assets)
+
+            if not orphan_assets:
+                messagebox.showinfo("Clean Up", "No unused assets were found.")
+                return
+
+            # 4. Calculate total disk size
+            orphan_files_info = []
+            total_bytes = 0
+            for rel_path in orphan_assets:
+                full_path = os.path.join(self.dat_path, rel_path)
+                try:
+                    sz = os.path.getsize(full_path)
+                except Exception:
+                    sz = 0
+                orphan_files_info.append((rel_path, full_path, sz))
+                total_bytes += sz
+
+            size_str = format_size(total_bytes)
+
+            if not messagebox.askyesno(
+                "Clean Up Assets",
+                f"Found {len(orphan_files_info)} unused asset(s) (~{size_str}).\n\n"
+                "These files are no longer referenced by the current meta database\n"
+                "(usually leftovers from game updates or removed mods).\n\n"
+                "Permanently delete them?"
+            ):
+                return
+
+            self.progress_bar["maximum"] = len(orphan_files_info)
+            self.progress_bar["value"] = 0
+
+            deleted = 0
+            failed = 0
+            freed_bytes = 0
+            total_count = len(orphan_files_info)
+            update_interval = max(1, total_count // 100)
+
+            for i, (rel_path, full_path, sz) in enumerate(orphan_files_info, start=1):
+                try:
+                    os.remove(full_path)
+                    deleted += 1
+                    freed_bytes += sz
+                    parent_dir = os.path.dirname(full_path)
+                    if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+                        try:
+                            os.rmdir(parent_dir)
+                        except Exception:
+                            pass
+                except Exception:
+                    failed += 1
+
+                # Throttled UI update to prevent freeze and optimize speed
+                if i % update_interval == 0 or i == total_count:
+                    self.progress_label.config(text=f"Deleting {i} / {total_count}")
+                    self.progress_bar["value"] = i
+                    self.root.update_idletasks()
+
+            freed_str = format_size(freed_bytes)
+            messagebox.showinfo(
+                "Done",
+                f"Clean up finished!\n\n"
+                f"Deleted: {deleted} asset(s) (~{freed_str} freed)\n"
+                f"Failed: {failed} asset(s)"
             )
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
-
-        self.progress_label.config(text="Waiting")
-
-        messagebox.showinfo(
-            "Done",
-            f"Deleted {deleted} unused asset(s).\n"
-            f"Failed to delete {failed} asset(s)."
-        )
+        finally:
+            self.clean_btn.config(state="normal")
+            self.progress_label.config(text="Waiting")
     def how_do_i_install_mod(self):
         messagebox.showinfo(
             "How do I install a mod?",
@@ -901,7 +1220,6 @@ class ModLoaderGUI:
                     if filter_path in parts:
                         filtered.append(p)
                 all_paths = filtered
-                #print(f"filtered: {all_paths}")
 
             # ---------------- VALIDATE ASSET FILES UPFRONT ----------------
             if not use_hash:
@@ -961,7 +1279,6 @@ class ModLoaderGUI:
                     row = c.fetchone()
                     # fallback unity & paired acb/awb
                     if not row:
-                        #print(f"{rel_path} not found, looking up")
                         if input_path.lower().endswith((".acb", ".awb")):
                             parent_dir = os.path.dirname(input_path)
                             fname = os.path.basename(input_path)
@@ -994,7 +1311,6 @@ class ModLoaderGUI:
                                                         c.execute("SELECT h FROM a WHERE n=?", (resolved_name,))
                                                     row = c.fetchone()
                                                     if row:
-                                                        #print(f"{row} is found!, breaking")
                                                         break
                             except Exception:
                                 pass
@@ -1053,6 +1369,14 @@ class ModLoaderGUI:
             "master",
             "master.mdb"
         )
+
+        if is_file_in_use(master_db):
+            messagebox.showwarning(
+                "Game File In Use",
+                "'master.mdb' is currently in use by the game.\n\n"
+                "Please return to the Title screen or close the game, then try again."
+            )
+            return
 
         conn = sqlite3.connect(master_db)
         c = conn.cursor()
@@ -1960,12 +2284,6 @@ class ModLoaderGUI:
         sub_dst = f"{int(sub_dst):02d}"
         sub_head_src = f"{int(sub_head_src):02d}"
         sub_head_dst = f"{int(sub_head_dst):02d}"
-        # print(f"{chara_src}")
-        # print(f"{chara_dst}")
-        # print(f"{sub_src}")
-        # print(f"{sub_dst}")
-        # print(f"{sub_head_src}")
-        # print(f"{sub_head_dst}")
         master.close()
 
         meta = sqlite3.connect(self.meta_path)
@@ -2129,7 +2447,6 @@ class ModLoaderGUI:
 
             if os.path.isfile(src_path):
                 shutil.copy2(src_path, dst_path)
-                #print(f"{src_path}")
                 copied += 1
             else:
                 print("missing dat:", src_path)
@@ -3505,7 +3822,6 @@ class ModLoaderGUI:
         assets_exist = os.path.isdir(os.path.join(mod_folder, "assets"))
 
         self.assets_load_btn.config(state="normal" if assets_exist else "disabled")
-        #self.assets_unload_btn.config(state="normal" if assets_exist else "disabled")
 
     def platform_check_manual(self, base_path):
         rel_paths = self.scan_full_path(base_path)
@@ -3701,6 +4017,7 @@ class ModLoaderGUI:
         if not folder or not os.path.isdir(folder):
             messagebox.showerror("Error", "Please select a valid mod folder first.")
             return
+
         asset_folder_v = os.path.join(folder, "assets")
         if not os.path.isdir(asset_folder_v):
             messagebox.showinfo("uhh", "there nothing inside.")
@@ -3734,28 +4051,6 @@ class ModLoaderGUI:
             )
         finally:
             self.progress_label.config(text="Waiting")
-
-    def unload_assets(self):
-        folder = self.mod_path.get()
-        asset_folder = os.path.join(folder, "assets")
-
-        self.progress_bar["maximum"] = len(assets)
-        self.progress_bar["value"] = 0
-
-        for i, asset in enumerate(assets, start=1):
-            dst = os.path.join(self.dat_path, asset[:2], asset)
-            backup = os.path.join(self.backup_path, asset[:2], asset)
-
-            if os.path.isfile(backup):
-                if os.path.exists(dst):
-                    os.remove(dst)
-                shutil.move(backup, dst)
-
-            self.progress_label.config(text=f"Unloading Asset {i} / {len(assets)}")
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
-        messagebox.showinfo("Success", "Assets unloaded successfully.")
-        self.progress_label.config(text="Waiting")
 
     def restore_original_assets(self):
         # collect backup files
