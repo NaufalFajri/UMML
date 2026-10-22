@@ -1032,86 +1032,123 @@ class ModLoaderGUI:
             messagebox.showerror("Error", "Game data folder not found.")
             return
 
+        if not hasattr(self, "meta_path") or not os.path.isfile(self.meta_path):
+            messagebox.showerror("Error", "Meta database file not found.")
+            return
+
+        self.clean_btn.config(state="disabled")
         self.progress_label.config(text="Scanning assets...")
         self.root.update_idletasks()
 
-        # Scan every file in dat
-        dat_assets = {
-            p.replace("\\", "/")
-            for p in self.scan_full_path(self.dat_path)
-        }
-
-        # Read every valid hash from meta
-        valid_assets = set()
+        def format_size(bytes_size):
+            size = float(bytes_size)
+            for unit in ["B", "KB", "MB", "GB", "TB"]:
+                if size < 1024.0:
+                    return f"{size:.1f} {unit}"
+                size /= 1024.0
+            return f"{size:.1f} PB"
 
         try:
-            conn = sqlite3.connect(self.meta_path)
-            c = conn.cursor()
-
-            c.execute("SELECT h FROM a")
-            for (h,) in c.fetchall():
-                valid_assets.add(f"{h[:2]}/{h}")
-
-            conn.close()
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read meta database.\n\n{e}")
-            return
-
-        # Files not referenced by meta
-        orphan_assets = sorted(dat_assets - valid_assets)
-
-        self.progress_label.config(text="Waiting")
-
-        if not orphan_assets:
-            messagebox.showinfo(
-                "Clean Up",
-                "No unused assets were found."
-            )
-            return
-
-        if not messagebox.askyesno(
-            "Clean Up",
-            f"Found {len(orphan_assets)} unused asset(s).\n\n"
-            "These files are not referenced by the current meta database.\n"
-            "They are usually leftovers from old game updates or removed mods.\n\n"
-            "Delete them?"
-        ):
-            return
-
-        self.progress_bar["maximum"] = len(orphan_assets)
-        self.progress_bar["value"] = 0
-
-        deleted = 0
-        failed = 0
-
-        for i, rel_path in enumerate(orphan_assets, start=1):
+            # 1. Read every valid hash from meta
+            valid_assets = set()
             try:
+                conn = sqlite3.connect(self.meta_path)
+                c = conn.cursor()
+                c.execute("SELECT h FROM a")
+                for (h,) in c.fetchall():
+                    if h:
+                        valid_assets.add(f"{h[:2]}/{h}")
+                conn.close()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read meta database.\n\n{e}")
+                return
+
+            # Safety Guard: game normally has tens of thousands of assets
+            if len(valid_assets) < 500:
+                messagebox.showerror(
+                    "Safety Abort",
+                    "Meta database returned insufficient valid assets.\n"
+                    "Clean up was aborted to protect your game installation from data loss."
+                )
+                return
+
+            # 2. Scan every file in dat (only match valid 'xx/hash' structure)
+            dat_assets = set()
+            for p in self.scan_full_path(self.dat_path):
+                norm_p = p.replace("\\", "/")
+                parts = norm_p.split("/")
+                if len(parts) == 2 and len(parts[0]) == 2:
+                    dat_assets.add(norm_p)
+
+            # 3. Find orphan assets
+            orphan_assets = sorted(dat_assets - valid_assets)
+
+            if not orphan_assets:
+                messagebox.showinfo("Clean Up", "No unused assets were found.")
+                return
+
+            # 4. Calculate total disk size
+            orphan_files_info = []
+            total_bytes = 0
+            for rel_path in orphan_assets:
                 full_path = os.path.join(self.dat_path, rel_path)
-                os.remove(full_path)
-                parent_dir = os.path.dirname(full_path)
-                if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
-                    try:
-                        os.rmdir(parent_dir)
-                    except Exception:
-                        pass
-                deleted += 1
-            except Exception:
-                failed += 1
+                try:
+                    sz = os.path.getsize(full_path)
+                except Exception:
+                    sz = 0
+                orphan_files_info.append((rel_path, full_path, sz))
+                total_bytes += sz
 
-            self.progress_label.config(
-                text=f"Deleting {i} / {len(orphan_assets)}"
+            size_str = format_size(total_bytes)
+
+            if not messagebox.askyesno(
+                "Clean Up Assets",
+                f"Found {len(orphan_files_info)} unused asset(s) (~{size_str}).\n\n"
+                "These files are no longer referenced by the current meta database\n"
+                "(usually leftovers from game updates or removed mods).\n\n"
+                "Permanently delete them?"
+            ):
+                return
+
+            self.progress_bar["maximum"] = len(orphan_files_info)
+            self.progress_bar["value"] = 0
+
+            deleted = 0
+            failed = 0
+            freed_bytes = 0
+            total_count = len(orphan_files_info)
+            update_interval = max(1, total_count // 100)
+
+            for i, (rel_path, full_path, sz) in enumerate(orphan_files_info, start=1):
+                try:
+                    os.remove(full_path)
+                    deleted += 1
+                    freed_bytes += sz
+                    parent_dir = os.path.dirname(full_path)
+                    if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+                        try:
+                            os.rmdir(parent_dir)
+                        except Exception:
+                            pass
+                except Exception:
+                    failed += 1
+
+                # Throttled UI update to prevent freeze and optimize speed
+                if i % update_interval == 0 or i == total_count:
+                    self.progress_label.config(text=f"Deleting {i} / {total_count}")
+                    self.progress_bar["value"] = i
+                    self.root.update_idletasks()
+
+            freed_str = format_size(freed_bytes)
+            messagebox.showinfo(
+                "Done",
+                f"Clean up finished!\n\n"
+                f"Deleted: {deleted} asset(s) (~{freed_str} freed)\n"
+                f"Failed: {failed} asset(s)"
             )
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
-
-        self.progress_label.config(text="Waiting")
-
-        messagebox.showinfo(
-            "Done",
-            f"Deleted {deleted} unused asset(s).\n"
-            f"Failed to delete {failed} asset(s)."
-        )
+        finally:
+            self.clean_btn.config(state="normal")
+            self.progress_label.config(text="Waiting")
     def how_do_i_install_mod(self):
         messagebox.showinfo(
             "How do I install a mod?",
