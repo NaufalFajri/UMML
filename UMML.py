@@ -13,7 +13,6 @@ import winreg
 import struct
 from pathlib import Path
 modloader_version = "2.0.1"
-required_keys = ["mod_version", "title", "description", "modloader_version"]
 
 # --- Check dependency ---
 def install_package(package):
@@ -50,12 +49,8 @@ except ImportError:
             "please try again."
         )
         sys.exit(0)
-print(f"UMML version: {modloader_version}\n")
-print("You are using an improved version of tumugu UMML v1.2.0.\n")
-print("[OK] UnityPy ready")
-print("[OK] vdf ready")
-print("[OK] apsw-sqlite3mc ready")
-print("[OK] pyyaml")
+print(f"UMML v{modloader_version} (Improved from Tumugu v1.2.0)")
+print("[OK] Dependencies verified: UnityPy, vdf, apsw-sqlite3mc, pyyaml\n")
 
 def resolve_case_sensitive_path(path_obj):
     """
@@ -851,7 +846,6 @@ def load_or_decrypt_meta_simple(dat_path, meta_path, region):
 class ModLoaderGUI:    
     def load_hachimi_dict(self):
         path = os.path.join(self.game_dir, "hachimi", "localized_data", "text_data_dict.json")
-        #print(f"{path}")
         if not os.path.isfile(path):
             self.hachimi_dict = {}
             return
@@ -871,8 +865,7 @@ class ModLoaderGUI:
         # bind function (optional but matches your request)
         self.meta_path_load = load_or_decrypt_meta_simple
         # resolve meta path ONCE at startup
-        self.meta_path = self.meta_path_load(self.dat_path, self.meta_path_pth, self.region)   
-        #print(f"[Meta] Using meta DB: {self.meta_path}")
+        self.meta_path = self.meta_path_load(self.dat_path, self.meta_path_pth, self.region)
         self.mod_path = tk.StringVar()
         self.title_text = tk.StringVar()
         self.version_text = tk.StringVar()
@@ -945,13 +938,7 @@ class ModLoaderGUI:
 
         character_menu = tk.Menu(misc_menu, tearoff=0)
         misc_menu.add_cascade(label="Character", menu=character_menu)
-        asset_menu = tk.Menu(misc_menu, tearoff=0)
-        misc_menu.add_cascade(label="Asset", menu=asset_menu)
 
-        asset_menu.add_command(
-            label="Clean Up",
-            command=self.warn_misc_unsupported(self.clean_unused_assets)
-        )
         character_menu.add_command(
             label="Attribute",
             command=self.warn_misc_unsupported(self.open_chara_settings)
@@ -1027,12 +1014,12 @@ class ModLoaderGUI:
         self.assets_load_btn.pack(side="left", padx=5)
         self.assets_load_raw_btn = tk.Button(control_frame, text="Import Asset Folder", command=self.load_assets_manual)
         self.assets_load_raw_btn.pack(side="left", padx=5)
-        #self.assets_unload_btn = tk.Button(control_frame, text="Unload Assets", state="disabled", command=self.unload_assets)
-        #self.assets_unload_btn.pack(side="left", padx=5)
-        tk.Label(control_frame, text=f"Version : {modloader_version}").pack(side="right")
-        tk.Label(control_frame, text=f"Region : {self.region} |").pack(side="right")
         self.restore_btn = tk.Button(control_frame, text="Restore Assets", command=self.restore_original_assets)
         self.restore_btn.pack(side="left", padx=5)
+        self.clean_btn = tk.Button(control_frame, text="Clean Up Assets", command=self.clean_unused_assets)
+        self.clean_btn.pack(side="left", padx=5)
+        tk.Label(control_frame, text=f"Version : {modloader_version}").pack(side="right")
+        tk.Label(control_frame, text=f"Region : {self.region} |").pack(side="right")
         progress_frame = tk.LabelFrame(self.root, text="Progress")
         progress_frame.pack(fill="x", padx=10, pady=5)
         self.progress_label = tk.Label(progress_frame, text="Waiting")
@@ -1100,7 +1087,14 @@ class ModLoaderGUI:
 
         for i, rel_path in enumerate(orphan_assets, start=1):
             try:
-                os.remove(os.path.join(self.dat_path, rel_path))
+                full_path = os.path.join(self.dat_path, rel_path)
+                os.remove(full_path)
+                parent_dir = os.path.dirname(full_path)
+                if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+                    try:
+                        os.rmdir(parent_dir)
+                    except Exception:
+                        pass
                 deleted += 1
             except Exception:
                 failed += 1
@@ -1189,7 +1183,6 @@ class ModLoaderGUI:
                     if filter_path in parts:
                         filtered.append(p)
                 all_paths = filtered
-                #print(f"filtered: {all_paths}")
 
             # ---------------- VALIDATE ASSET FILES UPFRONT ----------------
             if not use_hash:
@@ -1249,7 +1242,6 @@ class ModLoaderGUI:
                     row = c.fetchone()
                     # fallback unity & paired acb/awb
                     if not row:
-                        #print(f"{rel_path} not found, looking up")
                         if input_path.lower().endswith((".acb", ".awb")):
                             parent_dir = os.path.dirname(input_path)
                             fname = os.path.basename(input_path)
@@ -1282,7 +1274,6 @@ class ModLoaderGUI:
                                                         c.execute("SELECT h FROM a WHERE n=?", (resolved_name,))
                                                     row = c.fetchone()
                                                     if row:
-                                                        #print(f"{row} is found!, breaking")
                                                         break
                             except Exception:
                                 pass
@@ -2256,12 +2247,6 @@ class ModLoaderGUI:
         sub_dst = f"{int(sub_dst):02d}"
         sub_head_src = f"{int(sub_head_src):02d}"
         sub_head_dst = f"{int(sub_head_dst):02d}"
-        # print(f"{chara_src}")
-        # print(f"{chara_dst}")
-        # print(f"{sub_src}")
-        # print(f"{sub_dst}")
-        # print(f"{sub_head_src}")
-        # print(f"{sub_head_dst}")
         master.close()
 
         meta = sqlite3.connect(self.meta_path)
@@ -2425,7 +2410,6 @@ class ModLoaderGUI:
 
             if os.path.isfile(src_path):
                 shutil.copy2(src_path, dst_path)
-                #print(f"{src_path}")
                 copied += 1
             else:
                 print("missing dat:", src_path)
@@ -3801,7 +3785,6 @@ class ModLoaderGUI:
         assets_exist = os.path.isdir(os.path.join(mod_folder, "assets"))
 
         self.assets_load_btn.config(state="normal" if assets_exist else "disabled")
-        #self.assets_unload_btn.config(state="normal" if assets_exist else "disabled")
 
     def platform_check_manual(self, base_path):
         rel_paths = self.scan_full_path(base_path)
@@ -4031,28 +4014,6 @@ class ModLoaderGUI:
             )
         finally:
             self.progress_label.config(text="Waiting")
-
-    def unload_assets(self):
-        folder = self.mod_path.get()
-        asset_folder = os.path.join(folder, "assets")
-
-        self.progress_bar["maximum"] = len(assets)
-        self.progress_bar["value"] = 0
-
-        for i, asset in enumerate(assets, start=1):
-            dst = os.path.join(self.dat_path, asset[:2], asset)
-            backup = os.path.join(self.backup_path, asset[:2], asset)
-
-            if os.path.isfile(backup):
-                if os.path.exists(dst):
-                    os.remove(dst)
-                shutil.move(backup, dst)
-
-            self.progress_label.config(text=f"Unloading Asset {i} / {len(assets)}")
-            self.progress_bar["value"] = i
-            self.root.update_idletasks()
-        messagebox.showinfo("Success", "Assets unloaded successfully.")
-        self.progress_label.config(text="Waiting")
 
     def restore_original_assets(self):
         # collect backup files
