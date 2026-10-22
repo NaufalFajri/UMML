@@ -12,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "2.0.1"
+modloader_version = "2.0.2"
 
 # --- Check dependency ---
 def install_package(package):
