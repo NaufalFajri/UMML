@@ -12,7 +12,7 @@ import re
 import winreg
 import struct
 from pathlib import Path
-modloader_version = "2.0.2"
+modloader_version = "2.0.3"
 
 # --- Check dependency ---
 def install_package(package):
@@ -869,6 +869,8 @@ class ModLoaderGUI:
         self.mod_path = tk.StringVar()
         self.title_text = tk.StringVar()
         self.version_text = tk.StringVar()
+        self.compression_type = tk.StringVar(value="LZ4HC (Default)")
+        self.is_standard_mod = False
         self.load_hachimi_dict()
         self.create_widgets()
 
@@ -1012,12 +1014,19 @@ class ModLoaderGUI:
         control_frame.pack(fill="x", padx=10, pady=5)
         self.assets_load_btn = tk.Button(control_frame, text="Install Mod", state="disabled", command=self.load_assets)
         self.assets_load_btn.pack(side="left", padx=5)
-        self.assets_load_raw_btn = tk.Button(control_frame, text="Import Asset Folder", command=self.load_assets_manual)
-        self.assets_load_raw_btn.pack(side="left", padx=5)
         self.restore_btn = tk.Button(control_frame, text="Restore Assets", command=self.restore_original_assets)
         self.restore_btn.pack(side="left", padx=5)
         self.clean_btn = tk.Button(control_frame, text="Clean Up Assets", command=self.clean_unused_assets)
         self.clean_btn.pack(side="left", padx=5)
+        tk.Label(control_frame, text="Compression:").pack(side="left", padx=(10, 2))
+        self.compression_dropdown = ttk.Combobox(
+            control_frame,
+            textvariable=self.compression_type,
+            values=["LZ4HC (Default)", "LZ4 (Fast)", "LZMA (Smallest)", "Original", "None (Uncompressed)"],
+            state="readonly",
+            width=20
+        )
+        self.compression_dropdown.pack(side="left", padx=5)
         tk.Label(control_frame, text=f"Version : {modloader_version}").pack(side="right")
         tk.Label(control_frame, text=f"Region : {self.region} |").pack(side="right")
         progress_frame = tk.LabelFrame(self.root, text="Progress")
@@ -1152,16 +1161,13 @@ class ModLoaderGUI:
     def how_do_i_install_mod(self):
         messagebox.showinfo(
             "How do I install a mod?",
-            "Standard Mod\n"
-            "1. Click Browse.\n"
-            "2. Select the mod folder.\n"
-            "3. Click Install Mod.\n\n"
-            "Other Mod / Optional Mod\n"
-            "If you're installing a mod that isn't packaged for UMML, use Import Asset Folder instead.\n\n"
-            "1. Click Import Asset Folder.\n"
-            "2. Select the mod folder.\n"
-            "3. UMML will automatically detect the mod format and your game platform.\n"
-            "4. Review the detected settings, then click Yes to load the assets."
+            "Installing Mods in UMML:\n\n"
+            "1. Click 'Browse' to select any mod folder.\n"
+            "   (Supports both standard UMML mods and raw/custom asset folders)\n\n"
+            "2. UMML will automatically detect the mod structure and platform.\n\n"
+            "3. Click 'Install Mod' to install.\n"
+            "   - Standard mods & PC-s mods are encrypted and installed automatically.\n"
+            "   - For other folders, UMML will ask whether your assets need encryption."
         )
     def hachimi_translation_redirect(self, category, index, default_text):
         if not hasattr(self, "hachimi_dict") or not self.hachimi_dict:
@@ -1173,7 +1179,7 @@ class ModLoaderGUI:
         return self.hachimi_dict.get(cat, {}).get(idx, default_text)
         
     # from kairusds/umamusu-utils
-    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False, filter_path=None, direct_to_dat=False):
+    def decrypt_assets_internal(self, src_root, dst_root, use_hash=False, filter_path=None, direct_to_dat=False, compression_mode=None):
         AB_KEY = b'\x53\x2B\x46\x31\xE4\xA7\xB9\x47\x3E\x7C\xFB'
 
         def derive_asset_key(key_long):
@@ -1201,6 +1207,9 @@ class ModLoaderGUI:
         if direct_to_dat:
             os.makedirs(self.backup_path, exist_ok=True)
 
+        mode_val = compression_mode or (self.compression_type.get() if hasattr(self, "compression_type") else "LZ4 (Default)")
+        mode_str = str(mode_val)
+
         conn = sqlite3.connect(meta_db)
         try:
             c = conn.cursor()
@@ -1222,20 +1231,35 @@ class ModLoaderGUI:
                 all_paths = filtered
 
             # ---------------- VALIDATE ASSET FILES UPFRONT ----------------
-            if not use_hash:
-                valid_paths = []
-                for p in all_paths:
-                    full_p = os.path.join(src_root, p)
-                    if p.lower().endswith((".acb", ".awb", ".usm")):
-                        valid_paths.append(p)
-                    else:
-                        try:
-                            with open(full_p, "rb") as f:
-                                if f.read(8).startswith(b"UnityFS"):
-                                    valid_paths.append(p)
-                        except Exception:
-                            pass
-                all_paths = valid_paths
+            valid_paths = []
+            for p in all_paths:
+                full_p = os.path.join(src_root, p)
+                fname = os.path.basename(p).lower()
+                stem = os.path.splitext(fname)[0]
+
+                # Ignore non-asset metadata and documentation files
+                if fname in ("setting.yml", "setting.json", "meta.json", "mod_pack.png", "desktop.ini", ".ds_store", "thumbs.db"):
+                    continue
+                if fname.endswith((".txt", ".md", ".png", ".jpg", ".jpeg", ".zip", ".bat", ".py")):
+                    continue
+
+                if fname.endswith((".acb", ".awb", ".usm")):
+                    valid_paths.append(p)
+                    continue
+
+                if (len(fname) == 32 and fname.isalnum()) or (len(stem) == 32 and stem.isalnum()):
+                    valid_paths.append(p)
+                    continue
+
+                try:
+                    with open(full_p, "rb") as f:
+                        head = f.read(16)
+                        if head.startswith(b"UnityFS") or head.startswith(b"@UTF") or head.startswith(b"AFS2") or head.startswith(b"CRID"):
+                            valid_paths.append(p)
+                except Exception:
+                    pass
+
+            all_paths = valid_paths
                 
             total = len(all_paths)
             self.progress_bar["maximum"] = total
@@ -1252,78 +1276,97 @@ class ModLoaderGUI:
                 self.progress_bar["value"] = i
                 self.root.update_idletasks()
 
-                if use_hash:
-                    # input files are hashes
-                    if has_encrypt:
-                        c.execute("SELECT e FROM a WHERE h=?", (rel_path,))
-                        row = c.fetchone()
-                        if not row:
-                            missing_meta += 1
-                            continue
-                        enc_key = int(row[0])
-                    else:
-                        c.execute("SELECT 1 FROM a WHERE h=?", (rel_path,))
-                        row = c.fetchone()
-                        if not row:
-                            missing_meta += 1
-                            continue
-                        enc_key = 0
+                fname = os.path.basename(rel_path)
+                stem = os.path.splitext(fname)[0]
+                norm_path = rel_path.replace("\\", "/")
+                row = None
 
-                    hash_name = rel_path
-                else:
-                    # input files are meta paths
+                # 1. Look up by hash (if use_hash or fname/stem is 32-alnum)
+                target_h = stem if (len(stem) == 32 and stem.isalnum()) else (fname if (len(fname) == 32 and fname.isalnum()) else None)
+                if use_hash or target_h:
+                    search_h = target_h or fname
                     if has_encrypt:
-                        c.execute("SELECT h, e FROM a WHERE n=?", (rel_path,))
+                        c.execute("SELECT h, e FROM a WHERE h=?", (search_h,))
                     else:
-                        c.execute("SELECT h FROM a WHERE n=?", (rel_path,))
+                        c.execute("SELECT h, 0 FROM a WHERE h=?", (search_h,))
                     row = c.fetchone()
-                    # fallback unity & paired acb/awb
-                    if not row:
-                        if input_path.lower().endswith((".acb", ".awb")):
-                            parent_dir = os.path.dirname(input_path)
-                            fname = os.path.basename(input_path)
-                            stem, _ = os.path.splitext(fname)
-                            acb_pair = os.path.join(parent_dir, f"{stem}.acb")
-                            awb_pair = os.path.join(parent_dir, f"{stem}.awb")
-                            if os.path.isfile(acb_pair) and os.path.isfile(awb_pair):
-                                if has_encrypt:
-                                    c.execute("SELECT h, e FROM a WHERE n LIKE ?", (f"%/{fname}",))
-                                else:
-                                    c.execute("SELECT h FROM a WHERE n LIKE ?", (f"%/{fname}",))
-                                row = c.fetchone()
-                        else:
-                            try:
-                                with open(input_path, "rb") as f:
-                                    header = f.read(8)
-                                    if header.startswith(b"UnityFS"):
-                                        f.seek(0)
-                                        env = UnityPy.load(f)
 
-                                        for obj in env.objects:
-                                            if obj.type.name == "AssetBundle":
-                                                data = obj.read()
-                                                if data.m_Name:
-                                                    resolved_name = os.path.splitext(data.m_Name)[0]
-                                                    # retry lookup
-                                                    if has_encrypt:
-                                                        c.execute("SELECT h, e FROM a WHERE n=?", (resolved_name,))
-                                                    else:
-                                                        c.execute("SELECT h FROM a WHERE n=?", (resolved_name,))
-                                                    row = c.fetchone()
-                                                    if row:
-                                                        break
-                            except Exception:
-                                pass
-                    # FINAL CHECK
-                    if not row:
-                        missing_meta += 1
-                        continue
-
+                # 2. Look up by relative path in column 'n'
+                if not row:
                     if has_encrypt:
-                        hash_name, enc_key = row[0], int(row[1])
+                        c.execute("SELECT h, e FROM a WHERE n=?", (norm_path,))
                     else:
-                        hash_name = row[0]
-                        enc_key = 0
+                        c.execute("SELECT h, 0 FROM a WHERE n=?", (norm_path,))
+                    row = c.fetchone()
+
+                # 3. Strip common folder prefixes (assets/, pc-s/, dmm/, glo/) and lookup 'n'
+                if not row:
+                    parts = norm_path.split("/")
+                    for prefix in ("assets", "pc-s", "dmm", "glo"):
+                        if parts and parts[0].lower() == prefix:
+                            sub_path = "/".join(parts[1:])
+                            if has_encrypt:
+                                c.execute("SELECT h, e FROM a WHERE n=?", (sub_path,))
+                            else:
+                                c.execute("SELECT h, 0 FROM a WHERE n=?", (sub_path,))
+                            row = c.fetchone()
+                            if row:
+                                break
+
+                # 4. Fallback for audio/video (.acb, .awb, .usm)
+                if not row and fname.lower().endswith((".acb", ".awb", ".usm")):
+                    if has_encrypt:
+                        c.execute("SELECT h, e FROM a WHERE n LIKE ?", (f"%/{fname}",))
+                    else:
+                        c.execute("SELECT h, 0 FROM a WHERE n LIKE ?", (f"%/{fname}",))
+                    row = c.fetchone()
+
+                # 5. Fallback for UnityFS bundle internal AssetBundle m_Name
+                bundle_env = None
+                is_unityfs = False
+                try:
+                    with open(input_path, "rb") as f:
+                        header = f.read(8)
+                        if header.startswith(b"UnityFS"):
+                            is_unityfs = True
+                except Exception:
+                    pass
+
+                already_encrypted = False
+                if is_unityfs:
+                    try:
+                        bundle_env = UnityPy.load(input_path)
+                        if not bundle_env.files:
+                            already_encrypted = True
+                    except Exception:
+                        # Decompression failed -> Already encrypted with XOR
+                        already_encrypted = True
+                        bundle_env = None
+
+                if not row and is_unityfs and bundle_env:
+                    try:
+                        for obj in bundle_env.objects:
+                            if obj.type.name == "AssetBundle":
+                                data = obj.read()
+                                if data.m_Name:
+                                    resolved_name = os.path.splitext(data.m_Name)[0]
+                                    if has_encrypt:
+                                        c.execute("SELECT h, e FROM a WHERE n=?", (resolved_name,))
+                                    else:
+                                        c.execute("SELECT h, 0 FROM a WHERE n=?", (resolved_name,))
+                                    row = c.fetchone()
+                                    if row:
+                                        break
+                    except Exception:
+                        pass
+
+                # FINAL CHECK
+                if not row:
+                    missing_meta += 1
+                    continue
+
+                hash_name = row[0]
+                enc_key = int(row[1]) if has_encrypt and row[1] is not None else 0
 
                 if direct_to_dat:
                     output_path = os.path.join(dst_root, hash_name[:2], hash_name)
@@ -1333,31 +1376,58 @@ class ModLoaderGUI:
                             os.makedirs(os.path.dirname(backup), exist_ok=True)
                             shutil.move(output_path, backup)  # backup only once
                         else:
-                            os.remove(output_path)
+                            try:
+                                os.remove(output_path)
+                            except Exception:
+                                pass
                 else:
                     output_path = os.path.join(dst_root, hash_name)
 
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                # for audio / usm
-                if enc_key == 0:
-                    shutil.copy(input_path, output_path)
-                else:
-                    with open(input_path, "rb") as f:
-                        data = bytearray(f.read())
 
-                    if len(data) > 256:
+                # Process payload: Handle compression & encryption
+                if already_encrypted:
+                    # File is already encrypted by Cygames XOR -> direct copy without double XOR
+                    shutil.copy2(input_path, output_path)
+                else:
+                    final_data = None
+                    if is_unityfs and bundle_env and bundle_env.files:
+                        try:
+                            bundle = list(bundle_env.files.values())[0]
+                            mode_lower = mode_str.lower()
+                            if "lz4hc" in mode_lower:
+                                final_data = bundle.save(packer="lz4hc")
+                            elif "lz4" in mode_lower:
+                                final_data = bundle.save(packer="lz4")
+                            elif "lzma" in mode_lower:
+                                final_data = bundle.save(packer="lzma")
+                            elif "none" in mode_lower or "uncompressed" in mode_lower:
+                                final_data = bundle.save(packer="none")
+                            # If "original", leave as None to keep raw file data
+                        except Exception:
+                            final_data = None
+
+                    if final_data is None:
+                        with open(input_path, "rb") as fp:
+                            final_data = fp.read()
+
+                    # Apply XOR encryption if game has encryption key
+                    if enc_key != 0 and len(final_data) > 256:
                         key = derive_asset_key(enc_key)
                         if key:
+                            data_barr = bytearray(final_data)
                             klen = len(key)
-                            dlen = len(data)
+                            dlen = len(data_barr)
                             rem = dlen - 256
                             keystream = (key * ((dlen // klen) + 1))[256:dlen]
-                            data_int = int.from_bytes(data[256:], "big")
+                            data_int = int.from_bytes(data_barr[256:], "big")
                             key_int = int.from_bytes(keystream, "big")
-                            data[256:] = (data_int ^ key_int).to_bytes(rem, "big")
+                            data_barr[256:] = (data_int ^ key_int).to_bytes(rem, "big")
+                            final_data = bytes(data_barr)
 
                     with open(output_path, "wb") as f:
-                        f.write(data)
+                        f.write(final_data)
+
                 decoded_count += 1
         finally:
             conn.close()
@@ -3757,23 +3827,26 @@ class ModLoaderGUI:
             self.reload()
 
     def reset_mod_info(self):
+        self.is_standard_mod = False
         self.title_text.set("")
         self.version_text.set("")
         self.description_box.configure(state="normal")
         self.description_box.delete("1.0", tk.END)
         self.description_box.configure(state="disabled")
         self.assets_load_btn.config(state="disabled")
-        #self.assets_unload_btn.config(state="disabled")
 
     def reload(self):
         mod_folder = self.mod_path.get()
+        if not mod_folder or not os.path.isdir(mod_folder):
+            self.reset_mod_info()
+            return
 
         json_path = os.path.join(mod_folder, "setting.json")
         yml_path = os.path.join(mod_folder, "setting.yml")
 
         data = None
 
-        # --- try JSON first ---
+        # --- 1. Check Standard UMML configuration ---
         if os.path.isfile(json_path):
             try:
                 with open(json_path, encoding="utf-8") as f:
@@ -3782,8 +3855,6 @@ class ModLoaderGUI:
                 messagebox.showerror("Error", f"Failed to load setting.json:\n{e}")
                 self.reset_mod_info()
                 return
-
-        # --- fallback to YAML ---
         elif os.path.isfile(yml_path):
             try:
                 with open(yml_path, encoding="utf-8") as f:
@@ -3793,35 +3864,73 @@ class ModLoaderGUI:
                 self.reset_mod_info()
                 return
 
-        # --- no config found ---
-        else:
-            messagebox.showerror(
-                "Mod Settings Not Found",
-                "No setting.json or setting.yml found.\n\n"
-                "Are you trying to load an Asset Mod?\n"
-                "Use Import Asset Folder instead."
+        # --- If valid standard mod setting found ---
+        if data and isinstance(data, dict):
+            self.is_standard_mod = True
+            self.title_text.set(data.get("title", os.path.basename(mod_folder)))
+            self.version_text.set(f"mod_version: {data.get('mod_version', 'N/A')}")
+
+            self.description_box.configure(state="normal")
+            self.description_box.delete("1.0", tk.END)
+            desc = data.get("description", [])
+            if isinstance(desc, list):
+                self.description_box.insert(tk.END, "\n".join(desc))
+            else:
+                self.description_box.insert(tk.END, str(desc))
+            self.description_box.configure(state="disabled")
+
+            assets_exist = (
+                os.path.isdir(os.path.join(mod_folder, "assets")) or
+                bool(self.scan_full_path(mod_folder))
             )
-            self.reset_mod_info()
+            self.assets_load_btn.config(state="normal" if assets_exist else "disabled")
             return
 
-        self.title_text.set(data.get("title", "N/A"))
-        self.version_text.set(f"mod_version: {data.get('mod_version', 'N/A')}")
+        # --- 2. Custom / Raw Asset Mod (Non-UMML format) ---
+        self.is_standard_mod = False
+        all_files = self.scan_full_path(mod_folder)
+
+        if not all_files:
+            self.reset_mod_info()
+            self.description_box.configure(state="normal")
+            self.description_box.delete("1.0", tk.END)
+            self.description_box.insert(tk.END, "Selected folder is empty.")
+            self.description_box.configure(state="disabled")
+            return
+
+        folder_name = os.path.basename(os.path.normpath(mod_folder)) or "Custom Mod"
+        self.title_text.set(f"Custom Mod: {folder_name}")
+        self.version_text.set("Format: Raw / Custom Mod (Non-UMML)")
+
+        detected_tags = []
+        for tag in ["PC-s", "DMM", "GLO"]:
+            if any(tag in p.replace("\\", "/").split("/") for p in all_files):
+                detected_tags.append(tag)
+
+        info_lines = [
+            f"Path: {mod_folder}",
+            f"Total files detected: {len(all_files)}",
+            ""
+        ]
+        if detected_tags:
+            info_lines.append(f"Detected Platform: {', '.join(detected_tags)}")
+            if "PC-s" in detected_tags:
+                info_lines.append("-> 'PC-s' detected: Raw assets will be encrypted automatically.")
+            else:
+                info_lines.append("-> Platform folder detected: UMML will check encryption upon install.")
+        else:
+            info_lines.append("Platform: Standard Asset Structure")
+            info_lines.append("-> UMML will check encryption upon install.")
+
+        info_lines.append("")
+        info_lines.append("Ready to install. Click 'Install Mod' below to proceed.")
 
         self.description_box.configure(state="normal")
         self.description_box.delete("1.0", tk.END)
-        desc = data.get("description", [])
-        if isinstance(desc, list):
-            self.description_box.insert(tk.END, "\n".join(desc))
-        else:
-            self.description_box.insert(tk.END, str(desc))
-        #if data.get("modloader_version") != modloader_version:
-            #self.description_box.insert(tk.END, f"\n\n[Note] This mod was made for version {data['modloader_version']}")
+        self.description_box.insert(tk.END, "\n".join(info_lines))
         self.description_box.configure(state="disabled")
 
-        mod_folder = self.mod_path.get()
-        assets_exist = os.path.isdir(os.path.join(mod_folder, "assets"))
-
-        self.assets_load_btn.config(state="normal" if assets_exist else "disabled")
+        self.assets_load_btn.config(state="normal")
 
     def platform_check_manual(self, base_path):
         rel_paths = self.scan_full_path(base_path)
@@ -3837,180 +3946,15 @@ class ModLoaderGUI:
                 if key in parts:
                     found[key] = True
 
-        # ---------------- PLATFORM DETECTED ----------------
-
-        if any(found.values()):
-            # --- PC-s priority ---
-            region_warn = ""
-            if found["PC-s"]:
-                return "decrypt", "PC-s"
-
-            # --- DMM / GLO ---
-            if self.region == "Global":
-                if found["GLO"]:
-                    folder_type = "GLO"
-                else:
-                    folder_type = "DMM"
-                    region_warn = "GLO not found but "
-            else:
-                folder_type = "DMM"
-                
-            choice = messagebox.askyesnocancel(
-                "Encryption Check",
-                f"{region_warn}{folder_type} detected.\n\n"
-                "How was this mod created?\n\n"
-                "Yes → Regular mod (encrypt before loading)\n"
-                "No → Already-encrypted asset mod (load directly)\n\n"
-                "If you're not sure, choose ""Yes"". Most mods use this format."
-            )
-
-            if choice is None:
-                return None
-            if choice:
-                if region_warn != "":
-                    messagebox.showwarning("Sorry", "can't use encrypted asset for Global")
-                    return None
-                return "decrypt", folder_type
-            else:
-                return "direct", folder_type
-
-        # ---------------- NOT PLATFORM MOD ----------------
-
-        choice = messagebox.askyesnocancel(
-            "No Platform Detected",
-            "How was this mod created?\n\n"
-            "Yes → Regular mod (encrypt before loading)\n"
-            "No → Already-encrypted asset mod (load directly)\n\n"
-            "If you're not sure, choose ""Yes"". Most mods use this format."
-        )
-
-        if choice is None:
-            return None
-
-        if choice:
-            return "decrypt", None
-        else:
-            return "direct", None
-
-    def load_assets_manual(self):
-        path = filedialog.askdirectory(title="Select Asset Folder")
-        if not path:
-            return
-
-        result = self.platform_check_manual(path)
-
-        if result is None:
-            return
-
-        mode, filter_folder = result     
-        
-        # ---------------- LOAD ---------------- if is_mod_encrypted is true
-        confirm = messagebox.askyesno(
-            "Confirm",
-            f"Load assets now?"
-        )
-
-        if not confirm:
-            return
-            
-        if mode == "direct":
-            rel_paths = self.scan_full_path(path)
-            
-            if filter_folder:
-                filtered = []
-                for p in rel_paths:
-                    parts = p.replace("\\", "/").split("/")
-                    if filter_folder in parts:
-                        filtered.append(p)
-                rel_paths = filtered
-                
-            assets = [
-                os.path.join(path, p)
-                for p in rel_paths
-                if "." not in os.path.basename(p)
-                and len(os.path.basename(p)) == 32
-                and os.path.basename(p).isalnum()
-            ]
-
-            if not assets:
-                messagebox.showinfo("uhh", "there nothing inside.")
-                return
-                
-            os.makedirs(self.backup_path, exist_ok=True)
-
-            self.progress_bar["maximum"] = len(assets)
-            self.progress_bar["value"] = 0
-
-            loaded_count = 0
-            missing_count = 0
-
-            for i, src in enumerate(assets, start=1):
-                filename = os.path.basename(src)
-
-                dst = os.path.join(self.dat_path, filename[:2], filename)
-                backup = os.path.join(self.backup_path, filename[:2], filename)
-
-                if os.path.isfile(dst):
-                    if not os.path.isfile(backup):
-                        os.makedirs(os.path.dirname(backup), exist_ok=True)
-                        shutil.move(dst, backup)
-                    else:
-                        os.remove(dst)
-                else:
-                    missing_count += 1
-                    continue
-
-                try:
-                    shutil.copy(src, dst)
-                    loaded_count += 1
-                except Exception:
-                    missing_count += 1
-                    continue
-
-                self.progress_label.config(text=f"Loading Asset {i} / {len(assets)}")
-                self.progress_bar["value"] = i
-                self.root.update_idletasks()
-
-            self.progress_label.config(text="Waiting")
-
-            messagebox.showinfo(
-                "Success",
-                f"{loaded_count} assets loaded successfully.\n"
-                f"{missing_count} assets missing in dat folder."
-            )
-            return
-        # ---------------- LOAD ---------------- if is_mod_encrypted is false
-        elif mode == "decrypt":
-            try:
-                try:
-                    decoded_count, missing_meta = self.decrypt_assets_internal(
-                        path,
-                        self.dat_path,
-                        use_hash=False,
-                        filter_path=filter_folder,
-                        direct_to_dat=True
-                    )
-                except Exception as e:
-                    messagebox.showerror(
-                        "Decrypt Error",
-                        "Failed to decrypt assets.\n"
-                        "This mod may be incompatible with the current game version or region.\n\n"
-                        f"{e}"
-                    )
-                    return
-
-                if decoded_count == 0 and missing_meta == 0:
-                    messagebox.showinfo("uhh", "there nothing inside.")
-                    return
-
-                messagebox.showinfo(
-                    "Success",
-                    f"{decoded_count} assets loaded successfully.\n"
-                    f"{missing_meta} assets were not found in meta database."
-                )
-            finally:
-                self.progress_label.config(text="Waiting")
-            return
+        if found["PC-s"]:
+            return "PC-s"
+        elif found["GLO"] and self.region == "Global":
+            return "GLO"
+        elif found["DMM"]:
+            return "DMM"
+        elif found["GLO"]:
+            return "GLO"
+        return None
 
     def load_assets(self):
         folder = self.mod_path.get()
@@ -4018,37 +3962,45 @@ class ModLoaderGUI:
             messagebox.showerror("Error", "Please select a valid mod folder first.")
             return
 
-        asset_folder_v = os.path.join(folder, "assets")
-        if not os.path.isdir(asset_folder_v):
-            messagebox.showinfo("uhh", "there nothing inside.")
-            return
-        try:
-            try:
-                decoded_count, missing_meta = self.decrypt_assets_internal(
-                    asset_folder_v,
-                    self.dat_path,
-                    use_hash=False,
-                    filter_path=None,
-                    direct_to_dat=True
-                )
-            except Exception as e:
-                messagebox.showerror(
-                    "Decrypt Error",
-                    "Failed to decrypt assets.\n"
-                    "This mod may be incompatible with the current game version or region.\n\n"
-                    f"{e}"
-                )
-                return
+        # 1. Standard UMML Mod
+        if getattr(self, "is_standard_mod", False):
+            asset_folder = os.path.join(folder, "assets")
+            target_src = asset_folder if os.path.isdir(asset_folder) else folder
+            filter_folder = None
+        else:
+            # 2. Raw / Non-UMML Mod
+            target_src = folder
+            filter_folder = self.platform_check_manual(folder)
 
+        comp_choice = self.compression_type.get()
+        confirm = messagebox.askyesno(
+            "Confirm Installation",
+            f"Install mod '{self.title_text.get()}' now?\n\n"
+            f"Compression: {comp_choice}"
+        )
+        if not confirm:
+            return
+
+        try:
+            self.progress_label.config(text="Processing and installing assets...")
+            self.root.update_idletasks()
+            decoded_count, missing_meta = self.decrypt_assets_internal(
+                target_src,
+                self.dat_path,
+                filter_path=filter_folder,
+                direct_to_dat=True
+            )
             if decoded_count == 0 and missing_meta == 0:
-                messagebox.showinfo("uhh", "there nothing inside.")
+                messagebox.showinfo("Empty", "No valid assets found in the mod folder.")
                 return
 
             messagebox.showinfo(
                 "Success",
-                f"{decoded_count} assets loaded successfully.\n"
-                f"{missing_meta} assets were not found in meta database."
+                f"{decoded_count} asset(s) processed and installed successfully!\n"
+                f"{missing_meta} asset(s) were not found in meta database."
             )
+        except Exception as e:
+            messagebox.showerror("Install Error", f"Failed to install assets:\n{e}")
         finally:
             self.progress_label.config(text="Waiting")
 
