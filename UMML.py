@@ -869,7 +869,7 @@ class ModLoaderGUI:
         self.mod_path = tk.StringVar()
         self.title_text = tk.StringVar()
         self.version_text = tk.StringVar()
-        self.compression_type = tk.StringVar(value="LZ4 (Default)")
+        self.compression_type = tk.StringVar(value="LZ4HC (Default)")
         self.is_standard_mod = False
         self.load_hachimi_dict()
         self.create_widgets()
@@ -1022,9 +1022,9 @@ class ModLoaderGUI:
         self.compression_dropdown = ttk.Combobox(
             control_frame,
             textvariable=self.compression_type,
-            values=["LZ4 (Default)", "Original", "None (Uncompressed)"],
+            values=["LZ4HC (Default)", "LZ4 (Fast)", "LZMA (Smallest)", "Original", "None (Uncompressed)"],
             state="readonly",
-            width=18
+            width=20
         )
         self.compression_dropdown.pack(side="left", padx=5)
         tk.Label(control_frame, text=f"Version : {modloader_version}").pack(side="right")
@@ -1394,15 +1394,16 @@ class ModLoaderGUI:
                     if is_unityfs and bundle_env and bundle_env.files:
                         try:
                             bundle = list(bundle_env.files.values())[0]
-                            comp_flag = getattr(bundle, 'dataflags', 0) & 0x3F
-                            is_uncompressed = (comp_flag == 0)
-
-                            if "LZ4" in mode_str:
-                                if is_uncompressed or comp_flag not in (2, 3):
-                                    final_data = bundle.save(packer="lz4")
-                            elif "None" in mode_str or "Uncompressed" in mode_str:
-                                if comp_flag != 0:
-                                    final_data = bundle.save(packer="none")
+                            mode_lower = mode_str.lower()
+                            if "lz4hc" in mode_lower:
+                                final_data = bundle.save(packer="lz4hc")
+                            elif "lz4" in mode_lower:
+                                final_data = bundle.save(packer="lz4")
+                            elif "lzma" in mode_lower:
+                                final_data = bundle.save(packer="lzma")
+                            elif "none" in mode_lower or "uncompressed" in mode_lower:
+                                final_data = bundle.save(packer="none")
+                            # If "original", leave as None to keep raw file data
                         except Exception:
                             final_data = None
 
